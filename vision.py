@@ -7,7 +7,7 @@ Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure"
 
 Dev harness (needs calib.json):
 
-    python vision.py --row 13 --colour red [--source 0]
+    python vision.py --row 13 --colour red [--source N]
     keys: b = take "before", c = check, q = quit
 """
 import threading
@@ -259,15 +259,15 @@ class FakeVision:
 if __name__ == "__main__":
     import argparse
     import cv2
-    from camera import Camera, parse_source
+    from camera import Camera, default_source, parse_source
 
     p = argparse.ArgumentParser(description="Live vision dev harness")
     p.add_argument("--row", type=int, nargs="+", required=True, help="expected row(s)")
     p.add_argument("--colour", default=None, choices=list(HSV_RANGES))
-    p.add_argument("--source", default="0")
+    p.add_argument("--source", default=None, help="camera index or stream URL (default: CAMERA_SOURCE)")
     args = p.parse_args()
 
-    vision = Vision(Camera(parse_source(args.source)))
+    vision = Vision(Camera(parse_source(args.source) if args.source else default_source()))
     vision.expect_rows = args.row
     state = {"before": None, "busy": False}
 

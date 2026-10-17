@@ -1,10 +1,12 @@
 """Background thread that keeps the newest camera frame. Owner: V.
 
 Source is an int index or a stream URL. On a Mac, an iPhone (Continuity Camera) shows up as an
-extra index next to the built-in camera. Try 0, 1, 2 with the preview:
+extra index, and the order can change when it connects. Find it with the preview, then set
+CAMERA_SOURCE in .env so every tool uses it:
 
-    python camera.py 1        # q quits
+    python camera.py 1        # q quits; no argument = CAMERA_SOURCE
 """
+import os
 import sys
 import threading
 import time
@@ -12,6 +14,16 @@ import time
 
 def parse_source(s: str):
     return int(s) if s.isdigit() else s
+
+
+def default_source():
+    """CAMERA_SOURCE from .env or the environment, else 0. Indices shift when an iPhone connects."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    return parse_source(os.environ.get("CAMERA_SOURCE", "0"))
 
 
 class Camera:
@@ -52,7 +64,7 @@ class Camera:
 
 if __name__ == "__main__":
     import cv2
-    cam = Camera(parse_source(sys.argv[1] if len(sys.argv) > 1 else "0"))
+    cam = Camera(parse_source(sys.argv[1]) if len(sys.argv) > 1 else default_source())
     while cv2.waitKey(30) & 0xFF != ord("q"):
         frame = cam.latest()
         if frame is not None:

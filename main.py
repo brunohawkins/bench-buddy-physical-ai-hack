@@ -18,9 +18,9 @@ def build(fake: set[str], args):
         from vision import FakeVision
         vision = FakeVision()
     else:
-        from camera import Camera, parse_source
+        from camera import Camera, default_source
         from vision import Vision
-        vision = Vision(Camera(parse_source(os.environ.get("CAMERA_SOURCE", "0"))))
+        vision = Vision(Camera(default_source()))
 
     if "voice" in fake:
         from voice import FakeVoice

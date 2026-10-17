@@ -3,7 +3,7 @@
 Click 4 hole centres once (a1, j1, jN, aN). A homography then maps every camera frame to a flat,
 top-down board where each hole sits on a known pixel.
 
-    python calibrate.py --rows 63 [--source 0]
+    python calibrate.py --rows 63 [--source N]
 
 Keys: click = place point (a magnifier follows the mouse), u = undo, r = reset, Enter = save, q = quit.
 After saving, the window keeps showing the live grid so you can check it lines up.
@@ -152,9 +152,9 @@ def run(camera, rows: int) -> None:
 
 
 if __name__ == "__main__":
-    from camera import Camera, parse_source
+    from camera import Camera, default_source, parse_source
     p = argparse.ArgumentParser(description="Click 4 hole centres to calibrate the board")
     p.add_argument("--rows", type=int, required=True, help="number of numbered rows on the breadboard")
-    p.add_argument("--source", default="0", help="camera index or stream URL")
+    p.add_argument("--source", default=None, help="camera index or stream URL (default: CAMERA_SOURCE)")
     args = p.parse_args()
-    run(Camera(parse_source(args.source)), args.rows)
+    run(Camera(parse_source(args.source) if args.source else default_source()), args.rows)
