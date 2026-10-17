@@ -7,8 +7,8 @@ The plan, roles, interfaces and timeline are in [PLAN.md](PLAN.md).
 ## Team
 
 - Bruno Hawkins ([@brunohawkins](https://github.com/brunohawkins))
-- [@SummerRainZozo](https://github.com/SummerRainZozo)
-- [@parthiv-n](https://github.com/parthiv-n)
+- Zoe Gong [@SummerRainZozo](https://github.com/SummerRainZozo)
+- Parthiv Naidu [@parthiv-n](https://github.com/parthiv-n)
 
 ## Quick start
 
