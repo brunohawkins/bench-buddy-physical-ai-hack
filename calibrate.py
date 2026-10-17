@@ -27,6 +27,9 @@ MARGIN_COL = 5 * PITCH       # beyond columns a and j: room for the power rails
 ROW1_LEFT = True
 A_AT_BOTTOM = False
 TOP_COL = "j" if A_AT_BOTTOM else "a"    # the column drawn at the top of the flat view
+# Power-rail hole lines, in hole pitches down from the top terminal line, measured on our board. The
+# red stripe sits beside each + line, the blue beside each - line.
+RAILS = {"top +": -4.07, "top -": -2.86, "bottom +": 13.73, "bottom -": 14.95}
 
 GRID = (150, 150, 150)
 HIGHLIGHT = (0, 200, 0)
@@ -55,6 +58,15 @@ class Board:
         """Pixel centre of a terminal hole in the warped image."""
         down = COL_POS["j"] - COL_POS[col] if A_AT_BOTTOM else COL_POS[col]
         return MARGIN_ROW + (row - 1) * PITCH, MARGIN_COL + down * PITCH
+
+    def rail_at(self, x: float, y: float, tol: float = 0.45) -> str | None:
+        """Name of the power rail under warped point (x, y), e.g. "top +", or None."""
+        if not MARGIN_ROW - PITCH <= x <= MARGIN_ROW + self.rows * PITCH:
+            return None
+        for name, down in RAILS.items():
+            if abs(y - (MARGIN_COL + down * PITCH)) < tol * PITCH:
+                return name
+        return None
 
     def warp(self, frame):
         import cv2

@@ -164,6 +164,39 @@ def test_thick_cable_arc_does_not_beat_black_plug():
     assert result.status == "pass", (result, [(e["col"], e["row"]) for e in overlay["ends"]])
 
 
+def test_wire_into_power_rail():
+    from calibrate import MARGIN_COL, RAILS
+    before = BOARD.warp(camera_image(seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    x = BOARD.hole_xy(20, "a")[0]
+    y = int(MARGIN_COL + RAILS["top +"] * PITCH)
+    cv2.line(flat, (x, y), (x + 3 * PITCH, y + 5 * PITCH), RED, 7)
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, ["+"], "red")
+    assert result.status == "pass", (result, [e["label"] for e in overlay["ends"]])
+    result, _ = analyse(BOARD, before, flat, ["-"], "red")
+    assert result.status == "fail" and "top + rail" in result.detail, result
+
+
+def test_led_turns_on_and_off():
+    import time
+    from vision import Vision
+    cam = ScriptedCamera()
+    lit = camera_image(seed=11).copy()
+    centre = tuple(int(c) for c in BOARD.to_camera([BOARD.hole_xy(30, "e")])[0])
+    cv2.circle(lit, centre, 6, (40, 40, 255), -1)        # saturated red core...
+    cv2.circle(lit, centre, 3, (200, 200, 255), -1)      # ...with a bright centre
+    cam.scenes["led"] = lit
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+    time.sleep(1.5)
+    cam.scene = "led"
+    e = v.wait_for_event(timeout=5, kind="led_on")
+    assert e is not None and abs(e["led"]["row"] - 30) <= 1, e
+    cam.scene = "empty"
+    e = v.wait_for_event(timeout=5, kind="led_off")
+    assert e is not None, "LED never reported off"
+
+
 def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)

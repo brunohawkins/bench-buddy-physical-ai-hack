@@ -53,6 +53,13 @@ PLUG_DARK_MIN = 0.2                  # a candidate must be at least this dark (f
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
+LED_V = 235              # a lit LED: brightness (HSV V) at least this...
+LED_S = 60               # ...with colour (saturation) at least this...
+LED_RISE = 40            # ...and at least this much brighter than the same spot with the LED off
+LED_MIN_AREA = 6         # pixels of glow
+LED_MAX_AREA = 4 * PITCH ** 2      # bigger is a hand or glare, not an LED
+LED_ON_FRAMES = 3        # consecutive frames with a glow before reporting "on"
+LED_OFF_FRAMES = 6       # consecutive frames without before reporting "off"
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
@@ -88,8 +95,9 @@ def change_mask(before, after) -> np.ndarray:
 
 
 def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
-    """Jumper plugs in the change mask, snapped to terminal holes.
-    Each: {"x", "y", "row", "col", "kind": placed|removed, "blob"}; row/col None if not on a terminal hole.
+    """Jumper plugs in the change mask, snapped to terminal holes or power rails.
+    Each: {"x", "y", "row", "col", "rail", "label", "kind": placed|removed, "blob"}. label is "d12" or
+    "top + rail"; row/col are None on a rail, and label is None when the plug is on neither.
     Also returns the connected-component labels of the full mask (plug + cable) for the colour test."""
     import cv2
     m = mask.astype(np.uint8)
@@ -133,8 +141,11 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
             d = np.linalg.norm(board.hole_px - (x, y), axis=1)
             k = int(np.argmin(d))
             row, col = board.holes[k] if d[k] < END_SNAP else (None, None)
+            rail = board.rail_at(x, y) if row is None else None
+            label = f"{col}{row}" if row is not None else f"{rail} rail" if rail else None
             kind = "removed" if grey_a[blob].mean() > grey_b[blob].mean() else "placed"
-            ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "kind": kind, "blob": wire})
+            ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "rail": rail, "label": label,
+                         "kind": kind, "blob": wire})
     return ends, wire_labels
 
 
@@ -179,20 +190,30 @@ def analyse(board, before, after, expect_rows: list[int], wire_colour: str | Non
         return CheckResult("unsure", "Something big is in the way. Move your hand away, then say done."), overlay
     ends, wire_labels = plug_ends(board, mask, before, after)
     overlay["ends"] = ends
-    placed = [e for e in ends if e["row"] is not None and e["kind"] == "placed"]
+    placed = [e for e in ends if e["label"] is not None and e["kind"] == "placed"]
     if not placed:
         return CheckResult("unsure", "I don't see a wire plugged in yet. Check it's pushed in, then say done."), overlay
 
-    rows_found = sorted({e["row"] for e in placed})
-    if set(rows_found) != set(expect_rows):
-        want = " and ".join(map(str, expect_rows))
-        wrong = [e for e in placed if e["row"] not in expect_rows]
+    def matches(want, e):                       # want: a row number, or a rail like "+", "-", "top +"
+        return e["row"] == want if isinstance(want, int) else (e["rail"] is not None and str(want) in e["rail"])
+
+    def where(e):
+        return f"row {e['row']}" if e["row"] is not None else f"the {e['rail']} rail"
+
+    def wanted(w):
+        return f"row {w}" if isinstance(w, int) else f"the {w} rail"
+
+    rows_found = sorted({e["row"] for e in placed if e["row"] is not None})
+    missing = [w for w in expect_rows if not any(matches(w, e) for e in placed)]
+    extra = [e for e in placed if not any(matches(w, e) for w in expect_rows)]
+    if missing or extra:
+        want = " and ".join(wanted(w) for w in expect_rows)
         if len(expect_rows) == 1 and len(placed) == 1:
-            detail = f"That went into row {placed[0]['row']}, it should be row {want}."
-        elif wrong:
-            detail = f"I see a wire in row {' and '.join(str(e['row']) for e in wrong)}, it should be row {want}."
+            detail = f"That went into {where(placed[0])}, it should be {want}."
+        elif extra:
+            detail = f"I see a wire in {' and '.join(where(e) for e in extra)}, it should be {want}."
         else:
-            detail = f"I only see a wire in row {' and '.join(map(str, rows_found))}, it should be row {want}."
+            detail = f"I only see a wire in {' and '.join(where(e) for e in placed)}, it should be {want}."
         return CheckResult("fail", detail, rows_found), overlay
 
     if wire_colour:
@@ -208,7 +229,7 @@ def analyse(board, before, after, expect_rows: list[int], wire_colour: str | Non
             looks = f"looks {seen}" if fractions[seen] >= COLOUR_MIN else f"doesn't look {wire_colour}"
             return CheckResult("fail", f"Right row, but that wire {looks}. Use a {wire_colour} wire.", rows_found), overlay
 
-    rows = " and ".join(map(str, expect_rows))
+    rows = " and ".join(str(w) if isinstance(w, int) else f"the {w} rail" for w in expect_rows)
     return CheckResult("pass", f"Row {rows}{', ' + wire_colour if wire_colour else ''}. Looks good.", rows_found), overlay
 
 
@@ -220,17 +241,21 @@ def draw_result(board, warped, overlay: dict | None, expect_rows=()):
         contours, _ = cv2.findContours(overlay["mask"].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(warped, contours, -1, (0, 220, 255), 1)
         for e in overlay["ends"]:
-            if e["row"] is None:
+            if e.get("label") is None:
                 cv2.circle(warped, (int(e["x"]), int(e["y"])), 5, (200, 200, 200), 1)
                 continue
-            x, y = board.hole_px[board.holes.index((e["row"], e["col"]))].astype(int)
+            if e["row"] is None:                                   # on a power rail
+                x, y = int(e["x"]), int(e["y"])
+            else:
+                x, y = board.hole_px[board.holes.index((e["row"], e["col"]))].astype(int)
             if e.get("kind") == "removed":
                 cv2.circle(warped, (x, y), int(0.45 * PITCH), (160, 160, 160), 1)
                 continue
-            good = e["row"] in expect_rows
+            good = e["row"] in expect_rows or (e["rail"] is not None and any(
+                isinstance(w, str) and w in e["rail"] for w in expect_rows))
             colour = (0, 200, 0) if good else (0, 0, 255)
             cv2.circle(warped, (x, y), int(0.45 * PITCH), colour, 2)
-            cv2.putText(warped, f"{e['col']}{e['row']}", (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
+            cv2.putText(warped, e["label"], (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
     return warped
 
 
@@ -266,7 +291,10 @@ class Vision:
         self._fps = 0.0
         self.baseline = None                      # last accepted still board; events are changes from it
         self.events: list[dict] = []              # {"t", "kind": placed|removed, "holes": ["i14"], "before", "after", ...}
-        self.wires: set[str] = set()              # wire ends currently in the board, e.g. {"i14"}
+        self.wires: dict[str, tuple[float, float]] = {}   # wire ends in the board: label -> warped (x, y)
+        self.led = {"on": False, "label": None, "xy": None}  # LED state, updated every frame (see _led_step)
+        self._led_ref = None                      # brightness of the board with the LED off
+        self._led_hits = 0                        # consecutive frames with / without a glow (debounce)
         self._event_cv = threading.Condition()
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
@@ -289,6 +317,10 @@ class Vision:
         out.mkdir(exist_ok=True)
         cv2.imwrite(str(out / f"{stamp}_before.png"), before)
         cv2.imwrite(str(out / f"{stamp}_after.png"), after)
+        import json
+        (out / f"{stamp}_board.json").write_text(json.dumps({"corners": self.board.corners.tolist(),
+                                                              "rows": self.board.rows,
+                                                              "offsets": self.board.offsets.tolist()}))
         if mask.mean() < 0.005:
             return                                # nothing worth logging
         ends, _ = plug_ends(self.board, mask, before, after)
@@ -314,6 +346,7 @@ class Vision:
         shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
         if shift > MOVED:
             self.board = new
+            self._led_ref = None                  # reference was in the old grid
             self.status = f"board moved {shift:.1f} holes: re-aligned"
             print(f"  {self.status}", flush=True)
         return self.board.warp(raw)
@@ -349,7 +382,7 @@ class Vision:
                 continue
             big = 0
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
-            ends = [e for e in ends if e["row"] is not None and not self._near_known_wire(e)]
+            ends = [e for e in ends if e["label"] is not None and not self._near_known_wire(e)]
             if not ends:
                 self.baseline, seen = board_img, period    # cable moved / lighting drift: absorb it
                 continue
@@ -360,16 +393,20 @@ class Vision:
             board2 = self.board.warp(raw2)
             ends2, _ = plug_ends(self.board, change_mask(self.baseline, board2), self.baseline, board2)
             ends2 = [e for e in ends2 if not self._near_known_wire(e)]
-            key = lambda es: sorted((e["kind"], f"{e['col']}{e['row']}") for e in es if e["row"] is not None)
+            key = lambda es: sorted((e["kind"], e["label"]) for e in es if e["label"] is not None)
             if key(ends) != key(ends2):
                 continue
-            placed = sorted({f"{e['col']}{e['row']}" for e in ends if e["kind"] == "placed"})
-            removed = sorted({f"{e['col']}{e['row']}" for e in ends if e["kind"] == "removed"})
+            placed = sorted({e["label"] for e in ends if e["kind"] == "placed"})
+            removed = sorted({e["label"] for e in ends if e["kind"] == "removed"})
             kind = "moved" if placed and removed else "placed" if placed else "removed"
             event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
                      "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed"}),
                      "before": self.baseline, "after": board2, "overlay": {"mask": mask, "ends": ends}}
-            self.wires = (self.wires - set(removed)) | set(placed)
+            for e in ends:
+                if e["kind"] == "removed":
+                    self.wires.pop(e["label"], None)
+                else:
+                    self.wires[e["label"]] = (e["x"], e["y"])
             self.overlay = event["overlay"]
             parts = ([f"placed at {', '.join(placed)}"] if placed else []) + \
                     ([f"removed from {', '.join(removed)}"] if removed else [])
@@ -383,11 +420,10 @@ class Vision:
 
     def _near_known_wire(self, end: dict) -> bool:
         """A 'placement' within a hole of a wire already in the board is that wire's cable swinging."""
-        if end["kind"] != "placed" or end["row"] is None:
+        if end["kind"] != "placed" or end["label"] is None:
             return False
-        for hole in self.wires:
-            x, y = self.board.hole_px[self.board.holes.index((int(hole[1:]), hole[0]))]
-            if np.hypot(end["x"] - x, end["y"] - y) < 1.5 * PITCH:
+        for label, (x, y) in self.wires.items():
+            if label != end["label"] and np.hypot(end["x"] - x, end["y"] - y) < 1.5 * PITCH:
                 return True
         return False
 
@@ -441,7 +477,45 @@ class Vision:
                 if motion > MOTION_STILL:
                     self._still_since = now
                 self._fps = 0.9 * self._fps + 0.1 / max(now - t_prev, 1e-3)
+            self._led_step(warped, still=now - self._still_since >= STILL_FOR)
             t_prev = now
+
+    def _led_step(self, warped, still: bool) -> None:
+        """Real-time LED watch: a compact, bright, coloured glow that wasn't there with the LED off.
+        Debounced both ways, and only judged while the board is still (a hand under a lamp glows too)."""
+        import cv2
+        hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+        v = hsv[..., 2].astype(np.int16)
+        if self._led_ref is None or self._led_ref.shape != v.shape:
+            self._led_ref = v.astype(np.float32)
+            return
+        if not still:
+            return
+        glow = (v >= LED_V) & (hsv[..., 1] >= LED_S) & (v - self._led_ref >= LED_RISE)
+        n, labels, stats, cents = cv2.connectedComponentsWithStats(glow.astype(np.uint8))
+        spots = [i for i in range(1, n) if LED_MIN_AREA <= stats[i, cv2.CC_STAT_AREA] <= LED_MAX_AREA]
+        if not self.led["on"]:
+            self._led_ref = 0.95 * self._led_ref + 0.05 * v          # learn the board with the LED off
+        lit = bool(spots)
+        self._led_hits = self._led_hits + 1 if lit != self.led["on"] else 0
+        if self._led_hits < (LED_ON_FRAMES if lit else LED_OFF_FRAMES):
+            return
+        self._led_hits = 0
+        if lit:
+            i = max(spots, key=lambda k: stats[k, cv2.CC_STAT_AREA])
+            x, y = cents[i]
+            k = int(np.argmin(np.linalg.norm(self.board.hole_px - (x, y), axis=1)))
+            row, col = self.board.holes[k]
+            self.led = {"on": True, "label": f"{col}{row}", "row": row, "xy": (float(x), float(y))}
+        else:
+            self.led = {**self.led, "on": False}
+        kind = "led_on" if lit else "led_off"
+        self.status = f"LED {'ON near ' + self.led['label'] if lit else 'off'}"
+        print(f"[{time.strftime('%H:%M:%S')}] {self.status}", flush=True)
+        with self._event_cv:
+            self.events.append({"t": time.strftime("%H:%M:%S"), "kind": kind, "led": dict(self.led),
+                                "placed": [], "removed": [], "holes": [], "rows": []})
+            self._event_cv.notify_all()
 
     def is_still(self) -> bool:
         with self._lock:
@@ -505,8 +579,12 @@ class Vision:
                 time.time() - self._still_since >= STILL_FOR, self._fps
         self.board.draw_on_camera(raw, self.expect_rows)
         draw_result(self.board, warped, self.overlay, self.expect_rows)
-        for hole in self.wires:                           # every wire end currently in the board
-            x, y = self.board.hole_px[self.board.holes.index((int(hole[1:]), hole[0]))].astype(int)
+        if self.led["on"] and self.led.get("xy"):
+            lx, ly = map(int, self.led["xy"])
+            cv2.circle(warped, (lx, ly), int(0.8 * PITCH), (0, 255, 255), 3)
+            cv2.putText(warped, "LED ON", (lx + 18, ly + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        for x, y in list(self.wires.values()):            # every wire end currently in the board
+            x, y = int(x), int(y)
             cv2.circle(warped, (x, y), int(0.3 * PITCH), (255, 200, 0), -1)
         w = 1280
         raw = cv2.resize(raw, (w, int(raw.shape[0] * w / raw.shape[1])))
