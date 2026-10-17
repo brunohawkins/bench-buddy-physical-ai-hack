@@ -222,7 +222,7 @@ def test_model_judges_placement_and_tracks_state():
     assert parse_hole("d13") == (13, "d", None) and parse_hole("+top13") == (13, None, "top +")
     seen = []
 
-    def fake_judge(before, after, board=None, timeout=25):
+    def fake_judge(before, after, board=None, context=None, timeout=25):
         seen.append(board)
         return {"changes": [{"part": "wire", "action": "placed", "holes": ["d13"], "colour": "red"}],
                 "board": [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["d13", "+top13"]}],

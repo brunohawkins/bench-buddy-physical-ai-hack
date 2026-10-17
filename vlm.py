@@ -46,6 +46,10 @@ pins V G IO TX RX), a resistor, an LED.
 Parts already on the board before this change (from earlier looks, may be incomplete):
 {board}
 
+What was said at the bench just before (context only: it tells you what the user is trying to do, but the photos \
+decide which holes things are in; say so in "problem" if they disagree):
+{context}
+
 1. What was plugged in or pulled out between BEFORE and AFTER? Give the exact hole of every plug or leg: look where \
 it enters the board, not where the cable goes. A cable that only shifted, a hand, or a shadow is not a change.
 2. The full list of parts on the board AFTER the change, keeping earlier parts that are still there. A wire whose \
@@ -87,11 +91,12 @@ def _ask(text: str, images: list, timeout: float) -> dict:
     return json.loads(out)
 
 
-def judge(before_crop, after_crop, board: list | None = None, timeout: float = 25) -> dict:
+def judge(before_crop, after_crop, board: list | None = None, context: str | None = None,
+          timeout: float = 25) -> dict:
     """What was plugged in / pulled out between two labelled crops of the same area, the updated part list
     and a plain-English narration. board: the part list from the last judge() call. Raises on API errors."""
     known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing yet)"
-    out = _ask(JUDGE_PROMPT.format(board=known), [before_crop, after_crop], timeout)
+    out = _ask(JUDGE_PROMPT.format(board=known, context=context or "(nothing)"), [before_crop, after_crop], timeout)
     out.setdefault("changes", [])
     out.setdefault("board", board or [])
     return out

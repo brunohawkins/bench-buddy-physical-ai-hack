@@ -32,6 +32,11 @@ class BenchBuddy:
 
     def log(self, **fields) -> None:
         line = {"t": time.strftime("%H:%M:%S"), "state": self.state, **fields}
+        note = getattr(self.vision, "note", None)       # the vision model gets the conversation as context
+        if note and fields.get("said"):
+            note("Bench Buddy", fields["said"])
+        if note and fields.get("heard"):
+            note("User", fields["heard"])
         with LOG_PATH.open("a") as f:
             f.write(json.dumps(line) + "\n")
 

@@ -366,10 +366,15 @@ class Vision:
         if board is None:
             # Always calibrate fresh from the camera; the saved file is only a fallback, so a stale or
             # wrong calib.json can never poison a run.
+            try:                                  # the last session's grid only decides which way round it is
+                prev = calibrate.load() if calibrate.CALIB_PATH.exists() else None
+            except (OSError, ValueError, KeyError):
+                prev = None
             try:
-                board, info = calibrate.calibrate_from_camera(camera, rows)
+                board, info = calibrate.calibrate_from_camera(camera, rows, prev=prev)
                 print(f"auto-calibrated: {info['holes']}/{info['expected']} holes, "
-                      f"{'upright' if info['upright'] else 'rotated 180'}", flush=True)
+                      f"{'upright' if info['upright'] else 'rotated 180'}"
+                      f"{' (orientation kept from calib.json)' if prev is not None else ''}", flush=True)
             except calibrate.CalibrationError as e:
                 board = calibrate.load()
                 if board.rows != rows:
@@ -400,6 +405,7 @@ class Vision:
         self.narration = "The board is empty."    # plain-English description of the whole board, from the model
         self.summary = ""                        # the last change, one sentence
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
+        self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
@@ -554,6 +560,11 @@ class Vision:
             self._save_board()
             self._emit(event)
 
+    def note(self, who: str, text: str) -> None:
+        """Conversation context for the vision model, e.g. note("Bench Buddy", "Put the red wire in d20")."""
+        if text:
+            self.context = (self.context + [f"{who}: {text}"])[-6:]
+
     def _use_model(self) -> bool:
         import vlm
         return vlm.available()
@@ -572,7 +583,8 @@ class Vision:
         t0 = time.time()
         try:
             v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
-                          vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts)
+                          vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts,
+                          context="\n".join(self.context))
         except Exception as e:                              # never let the model break the loop
             print(f"  [vlm] failed ({e!r}); using pixel rules", flush=True)
             return False

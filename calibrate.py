@@ -469,8 +469,8 @@ def run(camera, rows: int) -> None:
     cv2.destroyAllWindows()
 
 
-def calibrate_from_camera(camera, rows: int, timeout: float = 15.0) -> tuple[Board, dict]:
-    """Retry auto_calibrate on fresh frames until it succeeds or times out."""
+def calibrate_from_camera(camera, rows: int, timeout: float = 15.0, prev: "Board | None" = None) -> tuple[Board, dict]:
+    """Retry auto_calibrate on fresh frames until it succeeds or times out. prev: keep its orientation."""
     import time
     last: Exception | str = "no camera frames"
     deadline = time.time() + timeout
@@ -478,7 +478,7 @@ def calibrate_from_camera(camera, rows: int, timeout: float = 15.0) -> tuple[Boa
         frame = camera.latest()
         if frame is not None:
             try:
-                return auto_calibrate(frame, rows)
+                return auto_calibrate(frame, rows, prev=prev)
             except CalibrationError as e:
                 last = e
         time.sleep(0.2)
