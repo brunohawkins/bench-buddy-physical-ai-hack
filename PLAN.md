@@ -72,6 +72,7 @@ As in v1, except a measure step names a `pin` rather than a `cmd`:
 {"id": "reset", "say": "Connect pin 4 to the 5 volt rail with a red wire.",
  "check": {"kind": "vision", "expect_rows": [13], "wire_colour": "red"}}
 {"id": "power-on", "say": "Plug in the Arduino.",
+ "check": {"kind": "measure", "pin": "A0", "expect_mv": [4500, 5300]}}
 {"t": "14:02:11", "state": "STEP", "step": "reset", "check": "vision",
  "result": "fail", "detail": "inserted in row 15, expected 13", "frame": "frames/0031.jpg"}
 ```
