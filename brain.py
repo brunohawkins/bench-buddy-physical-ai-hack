@@ -149,7 +149,11 @@ been quiet for a while), "check" (a check ran; its result is final, explain it a
 
 say: at most 2 short spoken sentences (40 words). Teach: explain why when it helps, answer questions about the
 current step or the circuit, encourage. Use the step's `why`. Only mention what the camera saw if it's in the
-event or `camera`. No markdown. Use "" if nothing is worth saying (e.g. a camera event that needs no comment).
+event or `camera`. `camera_status` says whether a CURRENT observation is available. An empty `camera` list means \
+no current visual evidence, NOT an empty breadboard. Never say a component is absent based on an earlier reply \
+in `recent`, a past camera note, or an empty parts list. If the user says they placed something, request advance \
+so the controller takes a fresh camera check; do not contradict them using old observations. No markdown. \
+Use "" if nothing is worth saying (e.g. a camera event that needs no comment).
 action:
 - advance: the user clearly says the current step is done, or (troubleshooting) that it works now.
 - repeat: they want the current instruction again.
@@ -305,6 +309,9 @@ def _quick_intent(transcript: str) -> Intent | None:
         return Intent("NOT_WORKING")
     if len(t) <= 6 and any(p in s for p in ("repeat", "say again", "say that again", "what was that", "pardon")):
         return Intent("REPEAT")
+    if s in ("i just did that", "just did that", "i did that", "i already did that", "already did that",
+             "i've done that", "i have done that", "that's done", "i finished that"):
+        return Intent("DONE")
     if len(t) <= 4 and "not" not in t and set(t) & {"done", "ok", "okay", "next", "yes", "yep", "yeah", "ready", "in"}:
         return Intent("DONE")
     return None

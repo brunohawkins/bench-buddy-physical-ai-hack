@@ -42,6 +42,11 @@ Small local changes now trigger checks, and a misaligned grid gets a bounded rec
 results are discarded if the board or current step changed. Use `VISION_VLM=0` for the existing pixel-only wire
 checks; full circuit checking needs the vision model. Camera corrections also appear in the browser chat.
 
+“Can you check?”, “can you see the LED?” and “I just did that” trigger a fresh camera check during a placement
+step. Old camera descriptions expire instead of being treated as a current view. LED checks include an extra
+close-up around the requested rows and distinguish a visible LED body from clearly resolved leg holes. If the
+body hides the entry points, angle the camera slightly to expose both legs; an unlit LED still counts as present.
+
 Run the offline regression suite (fake model responses, synthetic camera frames and captured speech text):
 
 ```bash

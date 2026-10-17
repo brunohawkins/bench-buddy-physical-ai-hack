@@ -21,6 +21,7 @@ from physics import predict, within
 LOG_PATH = Path("log.jsonl")
 IDLE_AFTER = 45                          # seconds of quiet during a step before checking in (once per step)
 PROBLEM_COOLDOWN = 20                    # repeat a persistent error at most once in this many seconds
+CAMERA_NOTE_TTL = 15                     # old notes must never be narrated as a live view
 GREETING = "Hi, I'm Bench Buddy. What do you want to build today?"
 # In INVENTORY, any of these means "I've got the parts, let's go".
 READY = ("next step", "what's next", "whats next", "what do i do", "let's start", "lets start", "let's go",
@@ -44,6 +45,7 @@ class Tutor:
         self.use_case, self.plan, self.parts_unknown = None, None, False
         self.recent: deque = deque(maxlen=6)         # (who, text) for the tutor's context
         self.camera: deque = deque(maxlen=3)         # latest camera notes
+        self._camera_event, self._camera_at = None, 0.0
         self.last_check = None
         self.last_event, self.nudged = time.time(), False
         self._speech_lock = threading.RLock()       # camera corrections and normal replies share one voice
@@ -182,7 +184,9 @@ class Tutor:
                 return
             if not ev.get("feedback_delivered"):
                 self._observe_problem(ev)
+            self.camera.clear()
             self.camera.append(ev["text"])
+            self._camera_event, self._camera_at = ev, time.monotonic()
             self.log(vision=ev["text"], kind=ev["kind"], holes=ev["holes"])
             if ev.get("problem") or self._problem or ev["kind"] == "assessment":
                 return                              # already spoken if confirmed; uncertain readings never advance
@@ -204,6 +208,10 @@ class Tutor:
         quick = _quick_intent(text)
         self.log(heard=text, intent=quick.kind if quick else "TUTOR",
                  stt_ms=getattr(self.voice, "last_stt_ms", None), llm_ms=None)
+        step = self.current()
+        if self.state == "STEP" and step and step["check"]["kind"] in ("look", "vision") \
+                and _visual_check_requested(text):
+            return self.check()
         if quick and quick.kind == "DONE" and not self.troubleshooting:
             return self.check() if self.state == "STEP" else self.respond(ev)
         if quick and quick.kind == "REPEAT":
@@ -243,9 +251,9 @@ class Tutor:
                     self.check()                     # "it works now" on the last step is the confirmation
                 else:
                     self.say_step()
-            elif self.state == "STEP" and self.current()["check"]["kind"] == "confirm":
+            elif self.state == "STEP" and self.current()["check"]["kind"] in ("confirm", "look"):
                 self.check()
-            # camera/meter-checked steps: the LLM's "advance" doesn't count; the user says done to run the check
+            # "advance" requests a fresh look check; only its result can pass the step.
         elif action == "advance" and ev["type"] == "vision" and self.state == "STEP" and self.current() \
                 and self.current()["check"]["kind"] == "look":
             self.check()                             # the camera saw it happen: let the vision model check the step
@@ -415,6 +423,9 @@ class Tutor:
             self.goto("STEP")
             return                                  # a problem arrived during verification; never advance past it
         self.last_check = {"step": step["id"], "result": status, "detail": detail}
+        if chk["kind"] in ("vision", "look"):
+            self.camera.clear()                     # the old empty-board note is superseded, even on an unsure check
+            self._camera_event = None
         self.log(step=step["id"], check=chk["kind"], result=status, detail=detail, frame=frame)
         if status == "pass":
             if chk["kind"] in ("vision", "look"):
@@ -425,7 +436,7 @@ class Tutor:
             return self.open_step(self.step_i + 1)
         self.goto("STEP")
         if status == "unsure":
-            return self.say("I can't see it clearly. Move your hand away, then say done.")
+            return self.say(detail or "I can't see it clearly. Move your hand away, then ask me to check again.")
         if chk["kind"] in ("vision", "look"):
             return self.say(detail, expected_version=version)
         out = self.brain.tutor(self.context(), {"type": "check", **self.last_check})
@@ -463,6 +474,15 @@ class Tutor:
 
     def context(self) -> dict:
         step = self.current()
+        camera = []
+        if self._camera_event and time.monotonic() - self._camera_at <= CAMERA_NOTE_TTL:
+            current = getattr(self.vision, "event_is_current", lambda event: False)
+            if current(self._camera_event):
+                camera = list(self.camera)
+        observation = getattr(self.vision, "observation", None)
+        if observation:
+            view = observation()
+            camera = [view["detail"]] if view["current"] else []
         return {
             "goal": self.goal,
             "use_case": self.use_case,
@@ -475,7 +495,8 @@ class Tutor:
             "troubleshooting": self.troubleshooting,
             "troubleshooting_notes": self.project["troubleshooting"] if self.project and self.troubleshooting else [],
             "recent": [f"{who}: {text}" for who, text in self.recent],
-            "camera": list(self.camera),
+            "camera": camera,
+            "camera_status": "current observation" if camera else "no current observation; request a fresh check",
             "last_check": self.last_check,
             "vision_problem": self._problem,
         }
@@ -487,6 +508,13 @@ def _ready(text: str) -> bool:
         return False
     quick = _quick_intent(text)
     return (quick is not None and quick.kind == "DONE") or any(f" {p} " in t for p in READY)
+
+
+def _visual_check_requested(text: str) -> bool:
+    s = " ".join(re.sub(r"[^a-z' ]", " ", text.lower()).split())
+    return any(p in s for p in ("can you check", "could you check", "please check", "check now", "check it",
+                               "can you see", "do you see", "does it look right", "does that look right")) \
+        and not any(p in s for p in ("don't check", "do not check", "can't check", "cannot check"))
 
 
 def _skip(text: str) -> bool:

@@ -359,3 +359,59 @@ def test_open_step_sends_explicit_task_and_circuit_to_vision():
     assert tasks[-1]["step"]["id"] == "power"
     assert tasks[-1]["plan"][0]["completed"] is True
     assert "IO -> row 30" in tasks[-1]["circuit"]
+
+
+@pytest.mark.parametrize("text", ["I just did that.", "Just did that, can you check?",
+                                  "Can you check now? I think I see it. Please place the LED.",
+                                  "Can you see the LED?", "Please check it."])
+def test_completion_and_check_requests_take_a_fresh_look_without_the_text_tutor(text):
+    from contracts import CheckResult
+    t = make(StubBrain({"say": "Nothing is plugged in", "action": "none"}))
+    speech(t, "radar light please")
+    speech(t, "done")
+    calls = []
+    t.vision.verify = lambda step: calls.append(step) or CheckResult("pass", "I see both leads in the rails.")
+    speech(t, text)
+    assert len(calls) == 1 and t.step_i == 2 and t.brain.tutor_calls == 0
+
+
+def test_text_model_advance_on_look_step_requests_verification():
+    from contracts import CheckResult
+    t = make(StubBrain({"say": "Now do the next step", "action": "advance"}))
+    speech(t, "radar light please")
+    speech(t, "done")
+    t.vision.verify = lambda step: CheckResult("fail", "The grey G lead is on the plus rail. Move it to minus.")
+    speech(t, "I have finished connecting both leads")
+    assert t.step_i == 1 and "grey G" in t.voice.said[-1]
+    assert "Now do the next step" not in t.voice.said
+
+
+def test_unclear_led_legs_preserves_visible_led_feedback():
+    from contracts import CheckResult
+    t = make(StubBrain())
+    speech(t, "radar light please")
+    speech(t, "done")
+    detail = "I see the LED body, but its legs are hidden. Tilt the camera slightly so I can see where they enter."
+    t.vision.verify = lambda step: CheckResult("unsure", detail)
+    speech(t, "can you check?")
+    assert t.voice.said[-1] == detail and t.step_i == 1
+
+
+def test_stale_empty_board_note_is_not_current_camera_evidence(monkeypatch):
+    t = make(StubBrain())
+    t.camera.append("The board is empty.")
+    t._camera_event = {"kind": "assessment"}
+    t._camera_at = tutor.time.monotonic() - tutor.CAMERA_NOTE_TTL - 1
+    t.vision.event_is_current = lambda event: True
+    assert t.context()["camera"] == []
+    assert "no current observation" in t.context()["camera_status"]
+    t._camera_at = tutor.time.monotonic()
+    t.vision.event_is_current = lambda event: False
+    assert t.context()["camera"] == []
+
+
+def test_fresh_verification_supersedes_old_camera_text():
+    t = make(StubBrain())
+    t.camera.append("The board is empty.")
+    t.vision.observation = lambda: {"current": True, "detail": "The LED body is visible."}
+    assert t.context()["camera"] == ["The LED body is visible."]

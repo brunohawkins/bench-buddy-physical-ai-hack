@@ -152,6 +152,55 @@ def test_verify_rejects_a_board_that_moves_during_call(scene, monkeypatch):
     assert scene.verify("IO in row 13").status == "unsure"
 
 
+def test_settled_lighting_twitch_does_not_discard_identical_board(scene, monkeypatch):
+    def judge(*args, **kwargs):
+        scene._still_since = time.time() - 1
+        return judgement()
+    monkeypatch.setattr(vlm, "judge", judge)
+    assert observe(scene) is True
+    assert scene.events[-1]["observed_period"] == scene._still_since
+
+
+def test_settled_but_different_board_still_discards_model_reply(scene, monkeypatch):
+    other = camera_image(wire_row=20, seed=2)
+    def judge(*args, **kwargs):
+        scene._raw = other
+        scene._still_since = time.time() - 1
+        return judgement()
+    monkeypatch.setattr(vlm, "judge", judge)
+    assert observe(scene) is None
+    assert scene.discarded_observations == 1 and not scene.events
+
+
+def test_verification_refreshes_tutor_evidence_without_old_empty_board_narration(scene, monkeypatch):
+    scene.narration = "The board is empty."
+    monkeypatch.setattr(vlm, "available", lambda: True)
+    monkeypatch.setattr(vlm, "verify", lambda *a, **kw: {"status": "pass", "detail": "Black V and grey G are in the rails."})
+    assert scene.verify("Check power").status == "pass"
+    assert scene.observation()["current"] and "Black V" in scene.observation()["detail"]
+    assert "empty" not in scene.describe()
+    scene._still_since = time.time()
+    assert not scene.observation()["current"] and scene.observation()["detail"] == ""
+
+
+def test_camera_evidence_expires_instead_of_becoming_a_permanent_claim(scene):
+    scene._record_observation("Nothing plugged in", scene._still_since, "judge")
+    assert scene.observation()["current"]
+    scene._observation["at"] -= vision.OBSERVATION_TTL + 1
+    assert not scene.observation()["current"] and scene.observation()["detail"] == ""
+
+
+def test_led_step_gets_an_additional_native_camera_crop(scene, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vlm, "available", lambda: True)
+    monkeypatch.setattr(vlm, "verify", lambda *a, **kw: calls.append(kw) or {"status": "unsure", "detail": "LED legs unclear"})
+    scene.verify("An LED in rows 13 and 14")
+    assert calls[0]["focus"] is not None
+    assert calls[0]["focus"].size < scene._raw.size
+    assert vlm.step_rows("Put one leg in row 13 and the other in row 14.") == [13, 14]
+    assert vlm.camera_focus(scene._raw, BOARD, []) is None
+
+
 def test_warning_or_missing_fix_cannot_become_spoken_accusation():
     assert vlm.validate_judgement(judgement(fix=None), 63)["severity"] == "warning"
     assert vlm.validate_judgement(judgement(severity="warning"), 63)["severity"] == "warning"

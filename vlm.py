@@ -68,6 +68,10 @@ Two LED legs in d35 and e35 are shorted; e35 and f35 are NOT shorted. Top and bo
 some rails split halfway: do not assume continuity across a gap without a visible jumper. Cable crossings do not \
 connect. Use lead colours only when the user identified their pin labels; never assume black means ground. \
 Do not infer hidden LED polarity, resistor value or a hidden pin from its intended position.
+An unlit LED still has a small coloured/clear dome and two thin metal legs. Seeing its body is evidence that \
+the LED is present even when its legs cannot be resolved. Report "LED visible, leg holes unclear" as a warning; \
+do not call it missing or require it to glow. Any extra AFTER detail photo is a crop of the same current view; \
+use the full overview to find parts outside that crop.
 Use severity "wrong" ONLY for a clearly visible wiring error with a specific correction. Give the observed \
 hole/rail and the intended destination in fix, naming the lead or leg unambiguously. If polarity is hidden, \
 ask them to identify the short/long leg before moving it. Use "warning" for occlusion, ambiguous holes, unknown \
@@ -131,14 +135,43 @@ def camera_view(frame, board=None, max_w: int = 1280):
     return np.ascontiguousarray(img)
 
 
+def step_rows(step: str) -> list[int]:
+    """Rows mentioned in an instruction, for an extra close-up (never used as placement evidence)."""
+    rows = set()
+    for match in re.finditer(r"\brows?\s+(\d+)(?:\s*(?:and|to|[-–])\s*(\d+))?", step, re.I):
+        rows.update(int(x) for x in match.groups() if x)
+    return sorted(rows)
+
+
+def camera_focus(frame, board, rows, pad_rows: int = 4):
+    """A native-resolution crop around the requested rows, retaining both halves and the rails."""
+    import numpy as np
+    rows = [r for r in rows if isinstance(r, int) and 1 <= r <= board.rows]
+    if not rows or frame is None:
+        return None
+    from calibrate import PITCH
+    lo, hi = max(1, min(rows) - pad_rows), min(board.rows, max(rows) + pad_rows)
+    x0 = board.hole_xy(lo, "a")[0] - PITCH
+    x1 = board.hole_xy(hi, "a")[0] + PITCH
+    pts = board.to_camera([(x0, 0), (x1, 0), (x1, board.size[1] - 1), (x0, board.size[1] - 1)])
+    left, top = np.floor(pts.min(axis=0)).astype(int)
+    right, bottom = np.ceil(pts.max(axis=0)).astype(int)
+    height, width = frame.shape[:2]
+    crop = frame[max(0, top):min(height, bottom + 1), max(0, left):min(width, right + 1)]
+    return np.ascontiguousarray(crop) if crop.size else None
+
+
 def judge(before_crop, after_crop, board: list | None = None, context: str | None = None,
-          timeout: float = 45, cam_before=None, cam_after=None, task=None) -> dict:
+          timeout: float = 45, cam_before=None, cam_after=None, task=None, focus=None) -> dict:
     """What was plugged in / pulled out between two labelled crops of the same area, the updated part list
     and a plain-English narration. board: the part list from the last judge() call. Raises on API errors."""
     known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing yet)"
     images, names = [before_crop, after_crop], ["flattened BEFORE", "flattened AFTER"]
     if cam_before is not None and cam_after is not None:
         images, names = [cam_before, cam_after] + images, ["camera BEFORE", "camera AFTER"] + names
+    if focus is not None:
+        images.append(focus)
+        names.append("camera AFTER detail around the current step's rows")
     return _ask(JUDGE_PROMPT.format(board=known, context=context or "(nothing)", images=", ".join(names),
                                    task=json.dumps(task or {})), images, timeout)
 
@@ -217,16 +250,22 @@ and visibly split rail segments need a jumper to connect them. A cable crossing 
 context gives the target circuit: fail for a clearly visible wiring error, even in an earlier step. Do not fail \
 just because a future step is not built yet. Hidden LED polarity, resistor values, unknown lead identity and \
 misaligned/occluded holes are unsure, never a guess. Give the exact observed and intended locations when wrong.
+An optional final image is a native-resolution close-up of the requested rows, from the same camera frame. \
+An unlit LED is still present: look for its small dome and thin metal legs, not emitted light. If its body is \
+visible but its leg holes or polarity are hidden, say that explicitly and return unsure. Never say no LED is \
+present just because you cannot verify its connections. Judge from the current images, not the earlier part list.
 
 Reply JSON only: {{"status": "pass"|"fail"|"unsure", "detail": "<one or two short sentences to say out loud: what \
 you see and, if wrong, exactly what to move where>"}}"""
 
 
 def verify(image_bgr, step: str, board: list | None = None, context: str | None = None, timeout: float = 45,
-           camera=None) -> dict:
+           camera=None, focus=None) -> dict:
     """Does the board show this step done? -> {"status": pass|fail|unsure, "detail"}. Raises on API errors."""
     known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing recorded yet)"
     images = [image_bgr] if camera is None else [camera, image_bgr]
+    if focus is not None:
+        images.append(focus)
     return _ask(VERIFY_PROMPT.format(board=known, context=context or "(nothing)", step=step), images, timeout)
 
 

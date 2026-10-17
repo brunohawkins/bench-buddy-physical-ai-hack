@@ -46,6 +46,7 @@ MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
 MOTION_STILL = 0.003     # fraction of moving pixels below which the board counts as still
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
 FRAME_TIMEOUT = 2.0      # a disconnected/frozen camera must not count as a stable current view
+OBSERVATION_TTL = 15.0   # do not feed old visual claims to the conversational tutor
 DIFF_PIXEL = 35.0        # Lab distance for a pixel to count as changed
 SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
 PLUG_OPEN = int(0.65 * PITCH) | 1    # opening kernel: wider than a cable, narrower than a plug
@@ -105,6 +106,15 @@ def change_mask(before, after) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     return mask.astype(bool)
+
+
+def meaningful_change(mask) -> bool:
+    """Whole-board change or a local plug-sized change; tolerate scattered noise and tiny alignment drift."""
+    import cv2
+    if mask.mean() >= MODEL_MIN_CHANGE:
+        return True
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+    return len(stats) > 1 and stats[1:, cv2.CC_STAT_AREA].max() >= MODEL_MIN_BLOB
 
 
 def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
@@ -410,13 +420,16 @@ class Vision:
         self._event_cv = threading.Condition()
         self._event_cursor = threading.local()     # a slow consumer must not lose events while speaking
         self.parts: list[dict] = []                # what the vision model says is on the board (see vlm.judge)
-        self.narration = "The board is empty."    # plain-English description of the whole board, from the model
+        self.narration = "No camera assessment yet."
         self.summary = ""                        # the last change, one sentence
         self.problem = None                       # wiring problem the model saw in the last change, if any
         self.fix, self.severity, self.grid = None, None, "aligned"
         self.task = {}
         self._task_version = 0
         self._force_assess = True                  # inspect an already-populated board at startup, too
+        self._observation = None
+        self.last_model_error = None
+        self.discarded_observations = 0
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
         self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
         self._build_notes: list[str] = []         # preserve user lead identities beyond the rolling dialogue
@@ -440,6 +453,32 @@ class Vision:
     def _observation_current(self, period, version) -> bool:
         current, _ = self._stable_board()
         return current == period and version == self._task_version and not self._stop.is_set()
+
+    def _matching_period(self, period, version, image, board):
+        """A harmless lighting/cable twitch during inference may leave the judged board unchanged."""
+        current, raw = self._stable_board()
+        if current is None or version != self._task_version or self._stop.is_set() or board is not self.board:
+            return None
+        if current == period:
+            return current
+        after = board.warp(raw)
+        mask = change_mask(image, after)
+        return current if not hand_in_view(after, mask) and not meaningful_change(mask) else None
+
+    def _record_observation(self, detail, period, source):
+        self._observation = {"detail": detail, "period": period, "source": source,
+                             "at": time.monotonic(), "observed_at": time.strftime("%H:%M:%S")}
+
+    def observation(self) -> dict:
+        """Current visual evidence for the tutor; an unavailable observation never means an empty board."""
+        seen = self._observation
+        age = time.monotonic() - seen["at"] if seen else None
+        period, _ = self._stable_board()
+        current = bool(seen and age <= OBSERVATION_TTL and period == seen["period"] and self.grid == "aligned")
+        return {"current": current, "detail": seen["detail"] if current else "",
+                "observed_at": seen["observed_at"] if seen else None,
+                "age_seconds": round(age, 1) if age is not None else None,
+                "source": seen["source"] if seen else None}
 
     def event_is_current(self, event: dict) -> bool:
         return "observed_period" not in event or self._observation_current(event["observed_period"],
@@ -658,23 +697,28 @@ class Vision:
         version = self._task_version
         if raw is None or not vlm.available() or self.grid != "aligned":
             return CheckResult("unsure", "I can't see the board right now.")
-        warped = self.board.warp(raw)
+        board = self.board
+        warped = board.warp(raw)
         try:
-            r = vlm.verify(vlm.labelled_crop(self.board, warped, None, self.expect_rows, pad_rows=0), step,
+            r = vlm.verify(vlm.labelled_crop(board, warped, None, self.expect_rows, pad_rows=0), step,
                            self.parts, self._vision_context() + "\nBuild task: " + json.dumps(self.task),
-                           camera=vlm.camera_view(raw, self.board))
+                           camera=vlm.camera_view(raw, board), focus=vlm.camera_focus(raw, board, vlm.step_rows(step)))
             if not isinstance(r, dict) or not isinstance(r.get("detail"), str):
                 raise ValueError("invalid verification reply")
         except Exception as e:
             print(f"  [vlm] verify failed: {e!r}", flush=True)
             return CheckResult("unsure", "I couldn't check that just now. Say done to try again.")
-        if not self._observation_current(period, version):
+        period = self._matching_period(period, version, warped, board)
+        if period is None:
             return CheckResult("unsure", "The board changed while I was checking. Hold it still and try again.")
         status = r.get("status") if r.get("status") in ("pass", "fail", "unsure") else "unsure"
         result = CheckResult(status, r.get("detail") or "", [])
         result.frame = self._save(warped, status)
         print(f"[{time.strftime('%H:%M:%S')}] verify {step[:50]!r}: {status} - {result.detail}", flush=True)
         self.status = result.detail
+        self.summary, self.narration = result.detail, ""  # this check supersedes old empty-board narration
+        self._record_observation(result.detail, period, "verify")
+        self._publish()
         return result
 
     def _use_model(self) -> bool:
@@ -685,13 +729,10 @@ class Vision:
         """Let the vision model judge a settled change: what was plugged in or pulled out, which holes, the
         updated part list and narration. False if it couldn't (API error): the pixel rules take over."""
         import vlm
-        import cv2
-        if not self._force_assess and mask.mean() < MODEL_MIN_CHANGE:
-            _, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
-            if len(stats) <= 1 or stats[1:, cv2.CC_STAT_AREA].max() < MODEL_MIN_BLOB:
-                # Keep the reference so a sequence of small movements can accumulate into a visible change.
-                self._led_rebase(board_img, period, full=False)
-                return True
+        if not self._force_assess and not meaningful_change(mask):
+            # Keep the reference so a sequence of small movements can accumulate into a visible change.
+            self._led_rebase(board_img, period, full=False)
+            return True
         overlay = {"mask": mask, "ends": []}
         before = self.baseline
         self.status = "looking closely..."
@@ -699,15 +740,22 @@ class Vision:
         version, task = self._task_version, self.task
         try:
             for attempt in range(2):
+                board = self.board
+                step = task.get("current_step") or {}
+                focus_rows = vlm.step_rows(step.get("say", "") + " " + step.get("check", {}).get("ask", ""))
                 v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
                               vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts,
                               context=self._vision_context(), task=task,
                               cam_before=None if self._baseline_raw is None else vlm.camera_view(self._baseline_raw, self.board),
-                              cam_after=vlm.camera_view(raw, self.board))
+                              cam_after=vlm.camera_view(raw, self.board),
+                              focus=vlm.camera_focus(raw, board, focus_rows))
                 v = vlm.validate_judgement(v, self.board.rows)
-                if not self._observation_current(period, version):
+                accepted_period = self._matching_period(period, version, board_img, board)
+                if accepted_period is None:
+                    self.discarded_observations += 1
                     self.status = "board or step changed; checking the latest view"
                     return None
+                period = accepted_period
                 if v["grid"] != "misaligned" or attempt:
                     break
                 self.status = "re-aligning the hole grid"
@@ -718,10 +766,14 @@ class Vision:
                 before = self.baseline
                 overlay = {"mask": change_mask(before, board_img), "ends": []}
         except Exception as e:                              # never let the model break the loop
+            self.last_model_error = type(e).__name__
+            self.status = "vision model unavailable; using pixel checks"
+            self._publish()
             print(f"  [vlm] failed ({e!r}); using pixel rules", flush=True)
             if not self._observation_current(period, version):
                 return None
             return False
+        self.last_model_error = None
         self._force_assess = False
         if v["grid"] != "aligned":
             # Do not store guessed hole locations or turn a calibration failure into a wiring accusation.
@@ -754,6 +806,7 @@ class Vision:
                  "source": "model", "before": before, "after": board_img, "overlay": overlay}
         self.overlay = overlay
         self.status = self.problem or self.summary or "watching the board"
+        self._record_observation(self.describe(), period, "judge")
         print(f"[{event['t']}] {self.summary}  ({time.time() - t0:.1f}s; placed {placed}, removed {removed})", flush=True)
         if v.get("problem"):
             print(f"  problem: {v['problem']}", flush=True)
@@ -768,7 +821,9 @@ class Vision:
         return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts,
                 "led": bool(self.led.get("on")), "led_at": self.led.get("label"), "summary": self.summary,
                 "narration": self.narration, "status": self.status, "problem": self.problem,
-                "fix": self.fix, "severity": self.severity, "grid": self.grid}
+                "fix": self.fix, "severity": self.severity, "grid": self.grid,
+                "observation": self.observation(), "last_model_error": self.last_model_error,
+                "discarded_observations": self.discarded_observations}
 
     def _publish(self) -> None:
         """Write the board state to frames/board_state.json and tell listeners (the UI server streams it)."""

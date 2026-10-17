@@ -164,6 +164,25 @@ small changes, malformed replies, API failures, grid recovery and circuit contex
 the updated prompts and thresholds still need a live phone-camera rehearsal. Model latency remains, typically
 3–15 seconds in the earlier live tests, plus 0.8 seconds of settling and any speech already playing.
 
+### Follow-up: stale empty-board replies and LED visibility
+
+Reproduced from the running session: “I just did that” / “can you check?” went to the text tutor, which repeated
+an old empty-board observation. Saying “done” invoked `Vision.verify` and correctly identified V/G, then IO and
+the resistor. These requests now invoke a fresh check directly; a tutor `advance` on a look step requests a
+verification too. Old camera evidence expires after 15 seconds, disappears on board motion, and is replaced by
+fresh verification detail. An empty evidence list means unknown, not an empty breadboard.
+
+`/api/board` includes `observation` (current, observed_at, age_seconds, detail, source), `last_model_error` and
+`discarded_observations` for diagnosis. A model reply after a harmless motion can be retained only if a settled
+pixel comparison shows the same board; actual plug changes still invalidate it. Exact obscured-leg feedback
+is spoken instead of the previous generic unsure phrase.
+
+Judge/verify also get a native-resolution raw close-up of rows named in the current step, alongside the full
+overview. Prompts separate LED presence from glow and from the ability to read its legs. Tested the revised
+verification prompt against the captured live preview: it identified the red LED body and returned unsure
+because its leg holes were obscured. It did not claim the LED was missing. Camera angle can still hide the
+entry points; the close-up cannot recover physically occluded legs. Restart the running app to load these changes.
+
 ## Also before the deadline
 
 - Parthiv: render `/api/board` `parts` in `board.mjs` (live 3D view) and make the presentation.
