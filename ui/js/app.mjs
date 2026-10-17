@@ -3,6 +3,7 @@
 import { createBoard, PARTS, partById } from "./board.mjs";
 import { drawMat } from "./mat.mjs";
 import { createDemo, DEMO_PROJECT } from "./demo.mjs";
+import { createHero } from "./hero.mjs";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -14,8 +15,7 @@ const SUGGEST = {
 };
 
 drawMat($("matMarks"));
-const hero = createBoard($("heroBoard"), { interactive: false });
-hero.set({ led: true, hz: 0.99 });
+createHero({ stage: $("heroStage"), boardEl: $("heroBoard"), chute: $("chute"), landing: $("landing") });
 
 // ---------------------------------------------------------------- session state
 const ui = {
@@ -44,7 +44,6 @@ function enterBench() {
       board = createBoard($("board"));
       board.reveal(prebuilt());
       $("board").addEventListener("part-hover", (e) => focusPart(e.detail));
-      renderPartsList();
     }
     if (!ui.started) connect();
   }, 380);
@@ -95,7 +94,7 @@ function applyHello(h) {
   ui.browserTts = !!h.browser_tts;
   ui.serverStt = !!h.server_stt;
   ui.camera = !!h.camera;
-  if (board) { board.reveal(prebuilt()); renderPartsList(); }
+  if (board) board.reveal(prebuilt());
   $("readout").textContent = `predicted ${ui.project.predicted.toFixed(2)} Hz · measured —`;
 }
 
@@ -114,7 +113,6 @@ function resetSession() {
   Object.assign(ui, { stepI: 0, fsm: "", pulledId: null, lastLocal: "", thinking: false });
   board.set({ overrides: {}, wrong: [], targets: [], tags: [], ghost: null, led: false, focus: null });
   board.reveal(prebuilt());
-  renderPartsList();
   setFsm("IDLE");
 }
 
@@ -153,14 +151,6 @@ function said(text, replay) {
 function setFsm(s) {
   const prev = ui.fsm;
   ui.fsm = s;
-  const order = ["INVENTORY", "PROPOSE", "STEP", "CHECK", "MEASURE", "DONE"];
-  const at = order.indexOf(s);
-  for (const li of $("fsm").children) {
-    const i = order.indexOf(li.dataset.s);
-    li.classList.toggle("now", li.dataset.s === s);
-    li.classList.toggle("past", at >= 0 && i >= 0 && i < at);
-  }
-  $("fsm").classList.toggle("debugging", s === "DEBUG");
   const labels = { CHECK: "Looking at your board…", MEASURE: "Measuring…", DEBUG: "Finding the fault…" };
   if (labels[s]) setStatus(labels[s]);
   suggest(SUGGEST[s] || []);
@@ -177,7 +167,6 @@ function showStep() {
   if (st.placed.includes(step.id)) return;
   const p = partById(step.id);
   board.set({ ghost: step.id, targets: [p.from, p.to], wrong: [], tags: [{ part: step.id, title: `Place · ${p.label}`, text: `${p.from[0]}${p.from[1]} → ${railName(p.to)}`, tone: "target" }] });
-  renderPartsList();
 }
 const RAIL = { "+L": "5 V rail", "+R": "5 V rail", "-L": "GND rail", "-R": "GND rail" };
 const railName = ([c, r]) => RAIL[c] || `${c}${r}`;
@@ -205,7 +194,6 @@ function visionResult(l) {
     board.set({ tags: [{ part: id, title: "Can't see it", text: "Move your hand out of the way", tone: "bad" }] });
     setInstruction(l.detail, "bad");
   }
-  renderPartsList();
 }
 
 function measureResult(l) {
@@ -235,7 +223,6 @@ function boardEvent(ev) {
     ui.pulledId = null;
     const st = board.get();
     board.set({ placed: [...new Set([...st.placed, ev.restored])], ghost: null, targets: [], wrong: [], tags: [] });
-    renderPartsList();
   }
 }
 
@@ -246,29 +233,12 @@ function pulled(id, quiet) {
   board.set({ placed: st.placed.filter((x) => x !== id), ghost: id, led: false, targets: [p.from, p.to], wrong: [],
     tags: quiet ? [] : [{ part: id, title: `Missing · ${p.label}`, text: p.detail, tone: "bad" }] });
   $("readout").textContent = `predicted ${ui.project.predicted.toFixed(2)} Hz · measured 0.00 Hz`;
-  renderPartsList();
 }
 
 function focusPart(id) {
   if (board.get().focus === id) return;
   board.set({ focus: id });
-  for (const li of $("partsItems").children) li.classList.toggle("hot", li.dataset.id === id);
 }
-
-function renderPartsList() {
-  if (!board) return;
-  const st = board.get();
-  const items = PARTS.map((p) => {
-    const placed = st.placed.includes(p.id);
-    const bad = placed && st.overrides[p.id];
-    const cls = bad ? "bad" : placed ? "" : "todo";
-    return `<li class="${cls}" data-id="${p.id}"><span class="chk"><svg viewBox="0 0 10 10"><path d="m2 5 2 2 4-4"/></svg></span><span class="nm">${esc(p.label)}</span><span class="dt">${esc(p.detail)}</span></li>`;
-  });
-  $("partsItems").innerHTML = items.join("");
-  $("partsCount").textContent = `${st.placed.filter((id) => !st.overrides[id]).length} / ${PARTS.length}`;
-}
-$("partsItems").addEventListener("pointerover", (e) => { const li = e.target.closest("li"); if (li) focusPart(li.dataset.id); });
-$("partsItems").addEventListener("pointerleave", () => focusPart(null));
 
 // ---------------------------------------------------------------- panel rendering
 function addMsg(who, text, via) {
@@ -331,6 +301,13 @@ function setStatus(text) { $("statusText").textContent = text; }
 function avatar(kind) { $("avatar").className = `avatar ${kind}`; }
 function thinking(on) {
   ui.thinking = on;
+  const panel = document.querySelector(".panel");
+  if (!on && panel.classList.contains("thinking")) {
+    panel.classList.add("cooling");
+    setTimeout(() => panel.classList.remove("cooling"), 400);
+  }
+  if (on) panel.classList.remove("cooling");
+  panel.classList.toggle("thinking", on);
   $("log").querySelector(".typing")?.remove();
   if (on) { $("log").append(typingEl()); $("log").scrollTop = $("log").scrollHeight; avatar("thinking"); setStatus("Thinking…"); }
   else if ($("avatar").classList.contains("thinking")) avatar("");
@@ -421,14 +398,51 @@ function speak(text) {
     const u = new SpeechSynthesisUtterance(text);
     if (voice) u.voice = voice;
     u.rate = 1.04;
-    const done = () => { avatar(""); clearTimeout(guard); resolve(); };
-    const guard = setTimeout(done, 400 + text.length * 90); // some browsers never fire onend
-    u.onstart = () => { avatar("speaking"); setStatus("Speaking…"); };
-    u.onend = done; u.onerror = done;
+    let guard, finished = false;
+    const talk = {
+      arm: () => { clearTimeout(guard); guard = setTimeout(talk.done, 400 + text.length * 90); }, // some browsers never fire onend
+      disarm: () => clearTimeout(guard),
+      done: () => {
+        if (finished) return;
+        finished = true; clearTimeout(guard);
+        if (current === talk) { current = null; speechBar(null); }
+        avatar(""); resolve();
+      },
+    };
+    talk.arm();
+    u.onstart = () => { current = talk; speechBar("speaking"); avatar("speaking"); setStatus("Speaking…"); };
+    u.onend = talk.done; u.onerror = talk.done;
     speechSynthesis.speak(u);
   });
 }
-function stopSpeaking() { if ("speechSynthesis" in window) speechSynthesis.cancel(); }
+// The utterance being spoken right now, so it can be paused, resumed or stopped.
+let current = null;
+function speechBar(state) {
+  $("speech").hidden = !state;
+  $("speech").classList.toggle("paused", state === "paused");
+  $("speechLabel").textContent = state === "paused" ? "Paused" : "Speaking";
+  $("pauseBtn").setAttribute("aria-pressed", state === "paused");
+  $("pauseBtn").querySelector("span").textContent = state === "paused" ? "Resume" : "Pause";
+  $("stopBtn").hidden = state !== "paused";
+}
+function pauseSpeaking() {
+  if (!current) return;
+  speechSynthesis.pause(); current.disarm();
+  speechBar("paused"); avatar(""); setStatus("Paused");
+}
+function resumeSpeaking() {
+  if (!current) return;
+  speechSynthesis.resume(); current.arm();
+  speechBar("speaking"); avatar("speaking"); setStatus("Speaking…");
+}
+function stopSpeaking() {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  speechSynthesis.resume(); // Chrome stays paused after cancel(), which would silence the next reply
+  if (current) { current.done(); setStatus("Ready"); }
+}
+$("pauseBtn").addEventListener("click", () => ($("pauseBtn").getAttribute("aria-pressed") === "true" ? resumeSpeaking() : pauseSpeaking()));
+$("stopBtn").addEventListener("click", stopSpeaking);
 $("mute").addEventListener("click", () => {
   ui.muted = !ui.muted;
   $("mute").setAttribute("aria-pressed", ui.muted);

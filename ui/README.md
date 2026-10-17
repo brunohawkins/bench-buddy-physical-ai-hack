@@ -25,4 +25,6 @@ Log lines the UI reacts to: `said`, `heard`, `transition`, `parts`/`missing`, `c
 `check: measure` (`detail: "predicted X Hz, measured Y Hz"`), `check: probe` (`node`, `detail`).
 
 Files: `index.html`, `styles.css`, `js/app.mjs` (controller), `js/demo.mjs`, `js/board.mjs` (isometric board, built with
-[anatomy](https://github.com/wheresryan22/anatomy)'s kit in `vendor/`, MIT), `js/mat.mjs` (mat rulers).
+[anatomy](https://github.com/wheresryan22/anatomy)'s kit in `vendor/`, MIT), `js/mat.mjs` (mat rulers),
+`js/hero.mjs` (landing animation: line-art board, the parts channel and the swap loop). `assets/raspberry-pi.svg` is the
+`<svg>` cut out of `figures/raspberry-pi/raspberry-pi.html`; re-extract it if that figure is rebuilt.
