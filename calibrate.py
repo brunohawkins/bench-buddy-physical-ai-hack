@@ -20,7 +20,7 @@ COLS = "abcdefghij"
 COL_POS = {c: i for i, c in enumerate("abcde")} | {c: i + 7 for i, c in enumerate("fghij")}
 PITCH = 20                   # warped pixels per hole pitch
 MARGIN_ROW = 2 * PITCH       # beyond row 1 and row N
-MARGIN_COL = 5 * PITCH       # beyond columns a and j: room for the power rails
+MARGIN_COL = 7 * PITCH       # beyond columns a and j: room for the power rails and plugs sitting in them
 
 # How this board is printed, seen with the red rail stripes above the blue ones. Checked on our board:
 # row 1 is on the left and column a is the TOP line of holes (a wire in d12 used to read as g12).

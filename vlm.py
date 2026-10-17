@@ -20,7 +20,9 @@ The parts in this project are: jumper wires (black plug housings), an LD2402 rad
 pins V, G, IO, TX, RX), a resistor, and an LED.
 
 Say what was just placed or removed, which rows its legs or pins are in, and anything that looks wrong, \
-for example both LED legs in the same row (shorted) or a part not pushed in. If unsure, say so.
+for example both LED legs in the same row (shorted) or a part not pushed in. Only name a part you can \
+actually see in the image: most changes are a single jumper wire (coloured cable, black plug). Do not \
+name the radar module unless its circuit board is visible. If unsure, say so.
 
 Reply as JSON only: {"component": str, "action": "placed"|"removed"|"unclear", "rows": [int], \
 "rails": [str], "problem": str or null, "summary": "one short sentence to say out loud"}"""
@@ -30,15 +32,16 @@ def available() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY")) and os.environ.get("VISION_VLM", "1") != "0"
 
 
-def describe(image_bgr, question: str | None = None, timeout: float = 20) -> dict:
-    """Ask the vision model about a labelled board image. Raises on API errors."""
+def describe(image_bgr, question: str | None = None, timeout: float = 20, hint: str | None = None) -> dict:
+    """Ask the vision model about a labelled board image. hint: what OpenCV saw. Raises on API errors."""
     import cv2
     from openai import OpenAI
     ok, jpg = cv2.imencode(".jpg", image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise ValueError("couldn't encode image")
     url = "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()
-    text = PROMPT + (f"\n\nAlso answer: {question}" if question else "")
+    text = PROMPT + (f"\n\nThe pixel tracker saw: {hint} (it can be wrong)." if hint else "") \
+        + (f"\n\nAlso answer: {question}" if question else "")
     resp = OpenAI().chat.completions.create(
         model=os.environ.get("OPENAI_VISION_MODEL") or DEFAULT_MODEL,
         response_format={"type": "json_object"},

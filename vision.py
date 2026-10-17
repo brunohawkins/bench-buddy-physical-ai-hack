@@ -327,7 +327,7 @@ class Vision:
             return                                # nothing worth logging
         ends, _ = plug_ends(self.board, mask, before, after)
         print(f"  debug {stamp}: changed {mask.mean():.1%}; plugs " +
-              (", ".join(f"{e['kind']} {e['col']}{e['row']}" for e in ends) or "none"), flush=True)
+              (", ".join(f"{e['kind']} {e['label'] or 'off-grid'}" for e in ends) or "none"), flush=True)
 
     def _save_board(self):
         import calibrate
@@ -442,7 +442,10 @@ class Vision:
         def run():
             try:
                 img = vlm.labelled_crop(self.board, event["after"], event.get("overlay"), self.expect_rows)
-                res = vlm.describe(img)
+                hint = (f"wire {event['kind']}: placed {event['placed'] or 'nothing'}, removed {event['removed'] or 'nothing'}"
+                        if event["kind"] != "changed" else
+                        f"something that is not a plain wire changed around rows {event['rows'][0]}-{event['rows'][-1]}")
+                res = vlm.describe(img, hint=hint)
             except Exception as e:                          # never let the model break the loop
                 print(f"  [vlm] failed: {e!r}", flush=True)
                 return
