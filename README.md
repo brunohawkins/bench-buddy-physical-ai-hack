@@ -35,7 +35,7 @@ python main.py --fake vision bench   # e.g. real voice + LLM, fake camera + Ardu
 | `voice.py` | L | Push-to-talk STT (OpenAI) and TTS (ElevenLabs) with a phrase cache |
 | `brain.py` | L | LLM: parts parsing, intent, phrasing replies |
 | `camera.py` | V | Threaded frame grabber; `python camera.py 1` to preview a camera index |
-| `calibrate.py` | V | `python calibrate.py --rows 63`: click 4 holes → warped board → (row, col) ↔ pixel |
+| `calibrate.py` | V | `python calibrate.py`: finds the board and every hole automatically → (row, col) ↔ pixel |
 | `vision.py` | V | Real-time view + placement check; `python vision.py --row 13 --colour red` to test live |
 | `tests/` | all | `.venv/bin/python tests/test_vision.py` |
 | `firmware/bench/bench.ino` | H | Arduino serial firmware (PING, READ, SAMPLE, FREQ) |

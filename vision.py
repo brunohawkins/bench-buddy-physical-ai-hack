@@ -1,11 +1,12 @@
 """Real-time board view and placement checks. Owner: V.
 
 A background thread warps every camera frame to the flat board (see calibrate.py), tracks motion
-and keeps an annotated live view. A check compares a stable "before" board with a stable "after"
+and keeps an annotated live view. With no calib.json it calibrates itself from the image, and while
+the board is still it re-checks the calibration every few seconds, re-snapping if the board moved. A check compares a stable "before" board with a stable "after"
 board hole by hole: holes whose colour changed -> rows, then an HSV colour test on those holes.
 Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure".
 
-Dev harness (needs calib.json):
+Dev harness (calibrates itself if there's no calib.json):
 
     python vision.py --row 13 --colour red [--source N]
     keys: b = take "before", c = check, q = quit
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from calibrate import COLS, PITCH
+from calibrate import PITCH
 from contracts import CheckResult, Snapshot
 
 FRAMES_DIR = Path("frames")
@@ -30,6 +31,8 @@ CHANGED = 18.0           # hole score (Lab distance above the board's median) th
 MIN_MARGIN = 1.5         # expected rows must beat the next row by this factor
 TOO_MUCH = 0.25          # more than this fraction of holes changed: a hand or the board moved
 COLOUR_MIN = 0.15        # fraction of changed-hole pixels that must match the wire colour
+RECAL_EVERY = 3.0        # seconds between self-calibration checks while the board is still
+RECAL_SHIFT = 0.3        # re-snap when the grid has moved by more than this many pitches
 
 # OpenCV HSV: H 0-180, S and V 0-255.
 HSV_RANGES = {
@@ -127,10 +130,18 @@ def draw_result(board, warped, changed: np.ndarray | None, expect_rows=()):
 # --- real-time -----------------------------------------------------------------------
 
 class Vision:
-    def __init__(self, camera, board=None):
+    def __init__(self, camera, board=None, rows: int = 63):
         import calibrate
         self.camera = camera
-        self.board = board or calibrate.load()
+        if board is None:
+            try:
+                board = calibrate.load()
+            except FileNotFoundError:
+                board, info = calibrate.calibrate_from_camera(camera, rows)
+                calibrate.save(board.corners.tolist(), board.rows)
+                print(f"auto-calibrated: {info['holes']}/{info['expected']} holes")
+        self.board = board
+        self._busy = False                        # true during a check: don't re-snap mid-comparison
         self.expect_rows: list[int] = []          # highlighted on the live view during a check
         self.changed: np.ndarray | None = None    # last check's changed holes, drawn on the live view
         self.status = ""                          # last check's detail line
@@ -142,6 +153,30 @@ class Vision:
         self._fps = 0.0
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._recalibrate_loop, daemon=True).start()
+
+    def _recalibrate_loop(self):
+        """Re-snap the grid if the board (or camera) has moved."""
+        import cv2
+        import calibrate
+        while True:
+            time.sleep(RECAL_EVERY)
+            if self._busy or not self.is_still():
+                continue
+            frame = self.camera.latest()
+            if frame is None:
+                continue
+            try:
+                new, _ = calibrate.auto_calibrate(frame, self.board.rows)
+            except calibrate.CalibrationError:
+                continue
+            old = self.board
+            moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), old.H).reshape(-1, 2)
+            shift = float(np.linalg.norm(moved - old.hole_px, axis=1).mean()) / PITCH
+            if shift > RECAL_SHIFT:
+                self.board = new
+                calibrate.save(new.corners.tolist(), new.rows)
+                self.status = f"board moved {shift:.1f} holes: recalibrated"
 
     def _loop(self):
         import cv2
@@ -192,6 +227,13 @@ class Vision:
         return Snapshot(image=warped, path=self._save(warped, "before"))
 
     def check_placement(self, before: Snapshot, expect_rows: list[int], wire_colour: str | None) -> CheckResult:
+        self._busy = True
+        try:
+            return self._check(before, expect_rows, wire_colour)
+        finally:
+            self._busy = False
+
+    def _check(self, before: Snapshot, expect_rows: list[int], wire_colour: str | None) -> CheckResult:
         self.expect_rows = list(expect_rows)
         first = self.wait_stable()
         time.sleep(1.0)

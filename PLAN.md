@@ -90,15 +90,22 @@ Row numbers are placeholders until H fixes the layout at 0:20.
 **No segmentation model.** Segmentation can find a wire, but it can't tell you which 2.5 mm hole the wire is in, and there's no pretrained breadboard model good enough to rely on. Instead, everything is geometry: a homography maps the board to a flat grid where every hole has a known pixel. That runs at camera frame rate on the CPU.
 
 1. `camera.py`: background thread holding the newest frame (1920×1080). `python camera.py 1` previews a camera index.
-2. `calibrate.py`: `python calibrate.py --rows 63`, then click the centres of holes a1, j1, j63, a63 with the magnifier, and press Enter. This saves `calib.json`. Re-run it if the camera moves.
+2. `calibrate.py`: **automatic, no clicks.** `python calibrate.py` finds the board and saves `calib.json` in about 40 ms.
+   - It takes the white board as the largest bright region and detects about 1,600 holes inside it.
+   - It straightens the hole lines using the holes themselves, then finds the 5 lines either side of the centre channel and numbers the 63 rows one neighbour to the next.
+   - A RANSAC fit over about 600 matched holes gives the camera-to-board mapping, refined in a second pass.
+   - The red/blue rail stripes set which way up the board is (`ROW1_LEFT`, `A_AT_BOTTOM` if your board is printed the other way).
+   - On the real board it matched 621 of 630 holes with a fit error of 0.08 of a hole spacing. It still lands on the same holes when the board is rotated by up to ±15° or 180°, or the camera is slightly tilted.
+   - `--manual` is still there as a click fallback.
 3. `vision.py` (real time):
    - A thread warps every frame, measures motion and keeps a live view: the camera with the projected grid, plus the flat board.
+   - With no `calib.json` it calibrates itself on start. While the board is still, it re-checks every 3 s and re-snaps the grid if the board has moved by more than 0.3 of a hole spacing.
    - A check waits for 0.8 s of stillness and compares before and after hole by hole (Lab colour distance, corrected for exposure drift).
    - It maps the changed holes to rows and runs an HSV colour test on them.
    - Two boards 1 s apart must agree. A hand in frame, nothing changed, or an ambiguous row all give `unsure`.
 4. `python vision.py --row 13 --colour red` is the dev harness: b takes "before", c runs the check, and thresholds are at the top of the file.
-5. `tests/test_vision.py`: synthetic tilted board covering correct row, wrong row, wrong colour, exposure drift, hand in frame, and nothing changed.
-6. Stretch: VLM yes/no on a labelled crop when `unsure`; LED blink detection; ArUco markers so the board can move without recalibrating.
+5. `tests/test_vision.py`: synthetic tilted board covering correct row, wrong row, wrong colour, exposure drift, hand in frame, nothing changed, and auto-calibration.
+6. Stretch: VLM yes/no on a labelled crop when `unsure`; LED blink detection.
 
 ### L: Voice + LLM
 

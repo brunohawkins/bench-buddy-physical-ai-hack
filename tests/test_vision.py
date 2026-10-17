@@ -11,13 +11,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibrate import COLS, MARGIN_COL, PITCH, Board  # noqa: E402
+from calibrate import COLS, PITCH, Board, auto_calibrate  # noqa: E402
 from vision import analyse  # noqa: E402
 
 ROWS = 30
 CAM = (1920, 1080)
 # Where holes a1, j1, jN, aN land in the camera image: a tilted, keystoned view.
-CORNERS = [(420, 380), (470, 700), (1500, 760), (1480, 330)]
+CORNERS = [(470, 700), (420, 380), (1480, 330), (1500, 760)]
 BOARD = Board(CORNERS, ROWS)
 
 RED, BLUE = (40, 40, 210), (200, 90, 30)
@@ -31,7 +31,7 @@ def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
         cv2.rectangle(flat, (x - 3, y - 3), (x + 3, y + 3), (60, 60, 60), -1)
     if wire_row:
         x, y = BOARD.hole_xy(wire_row, "c")
-        cv2.line(flat, (x, y), (x, MARGIN_COL - 3 * PITCH), colour, 7)
+        cv2.line(flat, (x, y), (x, y + 6 * PITCH), colour, 7)          # towards the rail below column a
         cv2.circle(flat, (x, y), 5, colour, -1)
     if hand:
         cv2.ellipse(flat, (w // 2, h // 2), (w // 3, h // 2), 0, 0, 360, (120, 160, 210), -1)
@@ -81,6 +81,14 @@ def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)
     assert len(BOARD.holes) == ROWS * len(COLS)
+
+
+def test_auto_calibration_finds_the_grid():
+    board, info = auto_calibrate(camera_image(seed=3), ROWS)
+    err = np.linalg.norm(board.hole_cam - BOARD.hole_cam, axis=1).mean()
+    camera_pitch = np.linalg.norm(BOARD.hole_cam[1] - BOARD.hole_cam[0]) / (11 / 10)  # a->b is one pitch
+    assert info["holes"] > 0.9 * ROWS * 10, info
+    assert err < 0.2 * camera_pitch, (err, camera_pitch)
 
 
 if __name__ == "__main__":
