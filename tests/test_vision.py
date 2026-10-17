@@ -150,6 +150,20 @@ def test_cable_moving_is_not_a_placement():
     assert result.status != "fail", (result, overlay["ends"])     # never blames a different row
 
 
+def test_thick_cable_arc_does_not_beat_black_plug():
+    before = BOARD.warp(camera_image(seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    w, h = BOARD.size
+    x, y = BOARD.hole_xy(12, "i")
+    ax, ay = BOARD.hole_xy(9, "j")
+    cv2.line(flat, (0, h // 2), (ax, ay), RED, 7)                      # cable from off the board...
+    cv2.circle(flat, (ax, ay), int(0.6 * PITCH), RED, -1)              # ...lifted arc: thick, survives opening
+    cv2.line(flat, (ax, ay), (x, y), RED, 7)
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, [12], "red")
+    assert result.status == "pass", (result, [(e["col"], e["row"]) for e in overlay["ends"]])
+
+
 def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)

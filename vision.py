@@ -9,8 +9,10 @@ A check compares a stable "before" board with a stable "after" board:
      misalignment, so hole edges don't light up)
   2. plug candidates: a morphological opening erases thin cable, leaving the plug housing (and the odd
      thick or shadowed stretch of cable)
-  3. the plug is the candidate at the far end of its wire from where the cable enters the image (both
-     ends for a jumper lying wholly on the board); its centre snaps to the nearest terminal hole.
+  3. the plug is the black candidate (housings are black, cables are coloured) at the far end of its
+     wire from where the cable enters the image (both ends for a jumper lying wholly on the board);
+     if every candidate is dark (a black cable) darkness can't tell, so it's just the far end.
+     Its centre snaps to the nearest terminal hole.
      Plugs on the rails are ignored. A spot that got darker is "placed", brighter is "removed"
   4. the wire's colour is measured along the changed blob the plug belongs to
 Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure".
@@ -44,6 +46,8 @@ SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
 PLUG_OPEN = int(0.65 * PITCH) | 1    # opening kernel: wider than a cable, narrower than a plug
 PLUG_MIN_AREA = 0.3 * PITCH ** 2     # smallest surviving blob treated as a plug
 PLUG_MAX_AREA = 8 * PITCH ** 2       # bigger than this is a hand or a component, not a plug
+PLUG_DARK = 80                       # Dupont housings are black: grey level below this is "plug dark"
+PLUG_DARK_MIN = 0.25                 # a candidate this dark (fraction of pixels) counts as a black housing
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
@@ -104,6 +108,12 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
 
     ends = []
     for wire, cands in by_wire.items():
+        # prefer black housings over thick or lifted stretches of coloured cable
+        darkness = {i: max((grey_a[labels == i] < PLUG_DARK).mean(), (grey_b[labels == i] < PLUG_DARK).mean())
+                    for i in cands}
+        dark = [i for i in cands if darkness[i] >= PLUG_DARK_MIN]
+        if dark and len(dark) < len(cands):
+            cands = dark
         ys, xs = np.nonzero(wire_labels == wire)
         pts = np.stack([xs, ys], axis=1).astype(np.float32)
         border = (xs <= 2) | (ys <= 2) | (xs >= w - 3) | (ys >= h - 3)
