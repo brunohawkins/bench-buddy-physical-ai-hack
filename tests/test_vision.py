@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 os.environ["VISION_PARALLAX"] = "0"   # synthetic images are flat: no plug height
+os.environ["VISION_VLM"] = "0"        # pixel rules only, offline; the model path has its own test
 
 import cv2
 import numpy as np
@@ -212,6 +213,36 @@ def test_bright_red_wire_is_not_an_led():
     assert e is not None and e["kind"] == "placed", e and e["kind"]
     time.sleep(1.5)
     assert not v.led["on"], v.led
+
+
+def test_model_judges_placement_and_tracks_state():
+    import time
+    import vlm
+    from vision import Vision, parse_hole
+    assert parse_hole("d13") == (13, "d", None) and parse_hole("+top13") == (13, None, "top +")
+    seen = []
+
+    def fake_judge(before, after, board=None, timeout=25):
+        seen.append(board)
+        return {"changes": [{"part": "wire", "action": "placed", "holes": ["d13"], "colour": "red"}],
+                "board": [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["d13", "+top13"]}],
+                "summary": "Red wire into d13.", "narration": "One red wire from d13 to the top + rail."}
+    real = vlm.judge, vlm.available
+    vlm.judge, vlm.available = fake_judge, (lambda: True)
+    try:
+        cam = ScriptedCamera()
+        v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+        deadline = time.time() + 5
+        while v.baseline is None and time.time() < deadline:
+            time.sleep(0.1)
+        cam.scene = "wire13"
+        result = v.wait_for_placement([13], "red", timeout=8)
+        assert result is not None and result.status == "pass", result
+        st = v.state()
+        assert st["parts"][0]["from"] == ["d", 13] and st["parts"][0]["to"] == ["+L", 13], st["parts"]
+        assert "red wire" in st["narration"], st
+    finally:
+        vlm.judge, vlm.available = real
 
 
 def test_calibration_round_trip():

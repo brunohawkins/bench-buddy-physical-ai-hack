@@ -26,7 +26,9 @@ Live view (calibrates itself if there's no calib.json; nothing to press):
 
     python -u vision.py [--row 13] [--colour red] [--source N]      # q quits
 """
+import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -69,6 +71,7 @@ LED_WARMUP = 2.0         # seconds of learning the board with the LED off before
 LED_BODY_MAX = 3 * PITCH  # an LED's coloured body is ~1-2 holes across; a cable is longer
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
+MODEL_MIN_CHANGE = 0.004  # a settled change smaller than this (fraction of the board) is absorbed without asking the model
 REALIGN_HOLES = 0.9      # re-align only from a fit that found this fraction of the holes (board uncovered)
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
 
@@ -202,6 +205,46 @@ def colour_fractions(image, mask) -> dict[str, float]:
     return out
 
 
+RAIL_UI = {"top +": "+L", "top -": "-L", "bottom +": "+R", "bottom -": "-R"}   # ui/js/board.mjs rail names
+
+
+def parse_hole(h: str) -> tuple[int | None, str | None, str | None]:
+    """"d20" -> (20, "d", None); "+top20" -> (20, None, "top +"); anything else -> (None, None, None)."""
+    h = str(h).strip().lower().replace(" ", "")
+    m = re.fullmatch(r"([a-j])(\d+)", h)
+    if m:
+        return int(m[2]), m[1], None
+    m = re.fullmatch(r"([+-])(top|bottom)(\d+)", h) or re.fullmatch(r"(top|bottom)([+-])(\d+)", h)
+    if m:
+        sign, side = (m[1], m[2]) if m[1] in "+-" else (m[2], m[1])
+        return int(m[3]), None, f"{side} {sign}"
+    return None, None, None
+
+
+def hole_label(h: str) -> str:
+    """Human label: "d20" stays, "+top20" -> "top + rail (row 20)"."""
+    row, col, rail = parse_hole(h)
+    return f"{col}{row}" if col else f"{rail} rail (row {row})" if rail else str(h)
+
+
+def ui_parts(board: list[dict]) -> list[dict]:
+    """The model's part list in ui/js/board.mjs PARTS shape: {id, kind, color, from: [col, row], to, label, detail}."""
+    out = []
+    for i, p in enumerate(board):
+        spots = []
+        for h in p.get("holes", []):
+            row, col, rail = parse_hole(h)
+            if row is not None:
+                spots.append([col or RAIL_UI[rail], row])
+        colour = p.get("colour") or None
+        kind = p.get("part", "other")
+        out.append({"id": p.get("id") or f"{kind}{i + 1}", "kind": kind, "color": colour,
+                    "from": spots[0] if spots else None, "to": spots[1] if len(spots) > 1 else None, "pins": spots,
+                    "label": f"{colour + ' ' if colour and kind == 'wire' else ''}{kind}".capitalize(),
+                    "detail": " -> ".join(hole_label(h) for h in p.get("holes", []))})
+    return out
+
+
 def hand_in_view(after, mask) -> bool:
     """Skin-coloured change too thick to be a cable, plug, LED or resistor: a hand or finger is over the board.
     Fingers are ~6 holes wide; erasing everything under 2 holes thick leaves only them."""
@@ -211,6 +254,29 @@ def hand_in_view(after, mask) -> bool:
     skin = ((h <= 25) | (h >= 170)) & (sat >= 40) & (sat <= 170) & (v >= 90) & mask
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * PITCH + 1, 2 * PITCH + 1))
     return int(cv2.morphologyEx(skin.astype(np.uint8), cv2.MORPH_OPEN, k).sum()) >= HAND_MIN_AREA
+
+
+def judge_placed(event: dict, expect: list, wire_colour: str | None) -> CheckResult:
+    """Pass/fail for a model-judged placement event against the expected rows / rails ("+", "top -", ...)."""
+    got = [(h, *parse_hole(h)) for h in event["placed"]]
+    got = [g for g in got if g[1] is not None]
+
+    def matches(want, g):
+        _, row, _, rail = g
+        return row == want if isinstance(want, int) else (rail is not None and str(want) in rail)
+
+    want_txt = " and ".join(f"row {w}" if isinstance(w, int) else f"the {w} rail" for w in expect)
+    rows_found = sorted({g[1] for g in got if g[2]})
+    if not got:
+        return CheckResult("unsure", "I can't tell where it went. Check it's pushed in.", rows_found)
+    missing = [w for w in expect if not any(matches(w, g) for g in got)]
+    if missing:
+        where = ", ".join(hole_label(g[0]) for g in got)
+        return CheckResult("fail", f"That went into {where}, it should be {want_txt}.", rows_found)
+    colours = [str(c.get("colour") or "").lower() for c in event.get("parts", []) if c.get("action") == "placed"]
+    if wire_colour and colours and not any(wire_colour.lower() in c for c in colours if c):
+        return CheckResult("fail", f"Right place, but that looks {colours[0]}, not {wire_colour}.", rows_found)
+    return CheckResult("pass", f"Got it, {', '.join(hole_label(g[0]) for g in got)}.", rows_found)
 
 
 def analyse(board, before, after, expect_rows: list[int], wire_colour: str | None) -> tuple[CheckResult, dict]:
@@ -330,6 +396,10 @@ class Vision:
         self._led_hits = 0                        # consecutive frames with / without a glow (debounce)
         self._led_ok = None                       # still period the watcher has accounted for (LED judged after)
         self._event_cv = threading.Condition()
+        self.parts: list[dict] = []                # what the vision model says is on the board (see vlm.judge)
+        self.narration = "The board is empty."    # plain-English description of the whole board, from the model
+        self.summary = ""                        # the last change, one sentence
+        self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
@@ -434,6 +504,9 @@ class Vision:
                     self.status = "something big is over the board"
                 continue
             big = 0
+            if self._use_model() and self._model_step(mask, board_img, raw, period):
+                seen = period
+                continue
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
             ends = [self._snap_removed(e) for e in ends]
             ends = [e for e in ends if e["label"] is not None and not self._near_known_wire(e)]
@@ -481,12 +554,84 @@ class Vision:
             self._save_board()
             self._emit(event)
 
+    def _use_model(self) -> bool:
+        import vlm
+        return vlm.available()
+
+    def _model_step(self, mask, board_img, raw, period) -> bool:
+        """Let the vision model judge a settled change: what was plugged in or pulled out, which holes, the
+        updated part list and narration. False if it couldn't (API error): the pixel rules take over."""
+        import vlm
+        if mask.mean() < MODEL_MIN_CHANGE:                  # a few stray pixels: absorb without asking
+            self.baseline, self._baseline_raw = board_img, raw
+            self._led_rebase(board_img, period, full=False)
+            return True
+        overlay = {"mask": mask, "ends": []}
+        before = self.baseline
+        self.status = "looking closely..."
+        t0 = time.time()
+        try:
+            v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
+                          vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts)
+        except Exception as e:                              # never let the model break the loop
+            print(f"  [vlm] failed ({e!r}); using pixel rules", flush=True)
+            return False
+        changes = [c for c in v.get("changes", []) if c.get("action") in ("placed", "removed") and c.get("holes")]
+        self.baseline, self._baseline_raw = board_img, raw
+        self._led_rebase(board_img, period, full=bool(changes))
+        if isinstance(v.get("board"), list):
+            self.parts = v["board"]
+        self.narration = v.get("narration") or self.narration
+        if not changes:
+            print(f"  [vlm] {time.time() - t0:.1f}s: nothing plugged in or pulled out", flush=True)
+            self.status = "watching the board"
+            self._publish()
+            return True
+        placed = sorted({h for c in changes if c["action"] == "placed" for h in c["holes"]})
+        removed = sorted({h for c in changes if c["action"] == "removed" for h in c["holes"]})
+        kind = "moved" if placed and removed else "placed" if placed else "removed"
+        self.summary = v.get("summary") or f"{kind} {', '.join(placed or removed)}"
+        event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
+                 "holes": placed or removed, "rows": sorted({parse_hole(h)[0] for h in placed} - {None}),
+                 "parts": changes, "summary": self.summary, "problem": v.get("problem"), "narration": self.narration,
+                 "source": "model", "before": before, "after": board_img, "overlay": overlay}
+        self.overlay = overlay
+        self.status = self.summary
+        print(f"[{event['t']}] {self.summary}  ({time.time() - t0:.1f}s; placed {placed}, removed {removed})", flush=True)
+        if v.get("problem"):
+            print(f"  problem: {v['problem']}", flush=True)
+        print(f"  board: {self.narration}", flush=True)
+        self._save_board()
+        self._publish()
+        self._emit(event)
+        return True
+
+    def state(self) -> dict:
+        """Everything a viewer needs: parts (ui/js/board.mjs shape), LED, narration, last change."""
+        return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts,
+                "led": bool(self.led.get("on")), "led_at": self.led.get("label"), "summary": self.summary,
+                "narration": self.narration, "status": self.status}
+
+    def _publish(self) -> None:
+        """Write the board state to frames/board_state.json and tell listeners (the UI server streams it)."""
+        st = self.state()
+        try:
+            (FRAMES_DIR / "board_state.json").write_text(json.dumps(st, indent=1))
+        except OSError:
+            pass
+        for fn in list(self.listeners):
+            try:
+                fn(st)
+            except Exception as e:
+                print(f"  [state] listener failed: {e!r}", flush=True)
+
     def _emit(self, event: dict) -> None:
-        """Publish an event, then ask the vision model about it in the background (if a key is set)."""
+        """Publish an event; pixel-rule events also get a background description from the model (if a key is set)."""
         with self._event_cv:
             self.events.append(event)
             self._event_cv.notify_all()
-        self._describe_async(event)
+        if event.get("source") != "model":
+            self._describe_async(event)
 
     def _describe_async(self, event: dict) -> None:
         import vlm
@@ -586,6 +731,11 @@ class Vision:
                 return None
             if event["placed"]:
                 break
+        if event.get("source") == "model":
+            result = judge_placed(event, expect_rows, wire_colour)
+            result.frame = self._save(draw_result(self.board, event["after"].copy(), event["overlay"], expect_rows), result.status)
+            self.status = result.detail
+            return result
         result, overlay = analyse(self.board, event["before"], event["after"], expect_rows, wire_colour)
         result.frame = self._save(draw_result(self.board, event["after"].copy(), overlay, expect_rows), result.status)
         self.overlay, self.status = overlay, result.detail
@@ -663,6 +813,7 @@ class Vision:
             self.events.append({"t": time.strftime("%H:%M:%S"), "kind": kind, "led": dict(self.led),
                                 "placed": [], "removed": [], "holes": [], "rows": []})
             self._event_cv.notify_all()
+        self._publish()
 
     def _led_rebase(self, board_img, period, full: bool) -> None:
         """The watcher has accounted for this still period: judge LEDs against the board as it accepted it.

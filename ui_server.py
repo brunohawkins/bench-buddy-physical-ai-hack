@@ -41,6 +41,9 @@ class UI:
             "camera": hasattr(vision, "camera") and hasattr(vision, "board"),
             "session": self.session,
         }
+        self._board: dict | None = None
+        if hasattr(vision, "listeners"):            # live board state from vision: parts, LED, narration
+            vision.listeners.append(lambda st: self.emit({"type": "board", **st}))
 
     # --- events ------------------------------------------------------------------
 
@@ -48,6 +51,8 @@ class UI:
         with self._lock:
             if event.get("type") == "status":
                 self._status.update({k: v for k, v in event.items() if k != "type"})
+            elif event.get("type") == "board":          # latest only, not history
+                self._board = event
             else:
                 self._history.append((len(self._history), event))
             n = len(self._history) - 1
@@ -69,6 +74,8 @@ class UI:
                     q.put((n, {**ev, "replay": True}))
                 if self._status:
                     q.put((len(self._history) - 1, {"type": "status", **self._status}))
+                if self._board:
+                    q.put((len(self._history) - 1, self._board))
             self._clients.append(q)
         return q
 
@@ -111,6 +118,9 @@ class UI:
             def do_GET(self):
                 if self.path == "/api/hello":
                     return self._json(ui.hello)
+                if self.path == "/api/board":              # vision's board state, see Vision.state()
+                    st = ui.vision.state() if hasattr(ui.vision, "state") else {}
+                    return self._json(st)
                 if self.path == "/events":
                     return self._events()
                 if self.path.startswith("/camera.mjpg"):
