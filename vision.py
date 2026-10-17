@@ -7,14 +7,16 @@ the board is still it re-checks the calibration every few seconds, re-snapping i
 A check compares a stable "before" board with a stable "after" board:
   1. change mask: pixels that differ from every position within +-2 px of "before" (forgives tiny
      misalignment, so hole edges don't light up)
-  2. each changed blob is a wire; its inserted end is the point farthest from where it enters the
-     image (or, for a jumper lying wholly on the board, both extremes along its length)
-  3. each end snaps to the nearest terminal hole -> (row, column); ends on the rails are ignored
-  4. the wire's colour is measured along the blob
+  2. plug candidates: a morphological opening erases thin cable, leaving the plug housing (and the odd
+     thick or shadowed stretch of cable)
+  3. the plug is the candidate at the far end of its wire from where the cable enters the image (both
+     ends for a jumper lying wholly on the board); its centre snaps to the nearest terminal hole.
+     Plugs on the rails are ignored. A spot that got darker is "placed", brighter is "removed"
+  4. the wire's colour is measured along the changed blob the plug belongs to
 Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure".
 
-Watching is automatic: whenever the board has been still for STILL_FOR seconds it is compared with
-the last accepted state, and a wire end appearing or disappearing becomes an event ("placed i14",
+Watching is automatic: whenever the board has been still for STILL_FOR seconds it re-calibrates
+from that frame (the board shifts when a wire is pushed in) and is compared with the last accepted state, and a wire end appearing or disappearing becomes an event ("placed i14",
 "removed i14"). Hands and big changes are never reported. The state machine can block on
 wait_for_placement(expect_rows) instead of waiting for the user to say "done".
 
@@ -39,14 +41,13 @@ MOTION_STILL = 0.003     # fraction of moving pixels below which the board count
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
 DIFF_PIXEL = 35.0        # Lab distance for a pixel to count as changed
 SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
-MIN_WIRE_AREA = 0.5 * PITCH ** 2   # smallest blob (pixels) treated as a wire
+PLUG_OPEN = int(0.65 * PITCH) | 1    # opening kernel: wider than a cable, narrower than a plug
+PLUG_MIN_AREA = 0.3 * PITCH ** 2     # smallest surviving blob treated as a plug
+PLUG_MAX_AREA = 8 * PITCH ** 2       # bigger than this is a hand or a component, not a plug
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
-END_REGION = 0.7 * PITCH # a wire end is the centroid of blob pixels this close to the extreme point
-END_SNAP = 0.75 * PITCH  # max distance from a wire end to a terminal hole
+END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
-RECAL_EVERY = 3.0        # seconds between self-calibration checks while the board is still
-RECAL_SHIFT = 0.3        # re-snap when the grid has moved by more than this many pitches
 
 # OpenCV HSV: H 0-180, S and V 0-255.
 HSV_RANGES = {
@@ -78,35 +79,48 @@ def change_mask(before, after) -> np.ndarray:
     return mask.astype(bool)
 
 
-def wire_ends(board, mask) -> list[dict]:
-    """Inserted ends of each changed blob, snapped to terminal holes where close enough.
-    Each end: {"x", "y", "row", "col", "blob"} with row/col None when not near a terminal hole."""
+def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
+    """Jumper plugs in the change mask, snapped to terminal holes.
+    Each: {"x", "y", "row", "col", "kind": placed|removed, "blob"}; row/col None if not on a terminal hole.
+    Also returns the connected-component labels of the full mask (plug + cable) for the colour test."""
     import cv2
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+    m = mask.astype(np.uint8)
+    n_wires, wire_labels = cv2.connectedComponents(m)
+    opened = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (PLUG_OPEN, PLUG_OPEN)))
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(opened)
+    grey_b = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    grey_a = cv2.cvtColor(after, cv2.COLOR_BGR2GRAY).astype(np.float32)
     h, w = mask.shape
-    ends = []
+
+    # plug candidates grouped by the wire (full-mask component) they sit on
+    by_wire: dict[int, list[int]] = {}
     for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] < MIN_WIRE_AREA:
-            continue
-        ys, xs = np.nonzero(labels == i)
+        if PLUG_MIN_AREA <= stats[i, cv2.CC_STAT_AREA] <= PLUG_MAX_AREA:
+            ys, xs = np.nonzero(labels == i)
+            by_wire.setdefault(int(np.bincount(wire_labels[ys, xs]).argmax()), []).append(i)
+
+    ends = []
+    for wire, cands in by_wire.items():
+        ys, xs = np.nonzero(wire_labels == wire)
         pts = np.stack([xs, ys], axis=1).astype(np.float32)
         border = (xs <= 2) | (ys <= 2) | (xs >= w - 3) | (ys >= h - 3)
-        if border.any():
-            entry = pts[border].mean(axis=0)                       # wire comes in from off the board
-            extremes = [pts[np.argmax(np.linalg.norm(pts - entry, axis=1))]]
-        else:                                                      # jumper lying wholly on the board
-            centred = pts - pts.mean(axis=0)
-            axis = np.linalg.svd(centred, full_matrices=False)[2][0]
-            proj = centred @ axis
-            extremes = [pts[np.argmin(proj)], pts[np.argmax(proj)]]
-        for ext in extremes:
-            near = pts[np.linalg.norm(pts - ext, axis=1) < END_REGION]
-            x, y = near.mean(axis=0)
+        if border.any():                                  # cable comes in from off the board
+            entry = pts[border].mean(axis=0)
+            chosen = [max(cands, key=lambda i: np.linalg.norm(cents[i] - entry))]
+        else:                                             # jumper lying wholly on the board: both ends
+            mean = pts.mean(axis=0)
+            axis = np.linalg.svd(pts - mean, full_matrices=False)[2][0]
+            proj = {i: float((cents[i] - mean) @ axis) for i in cands}
+            chosen = sorted({min(proj, key=proj.get), max(proj, key=proj.get)})
+        for i in chosen:
+            blob = labels == i
+            x, y = cents[i]
             d = np.linalg.norm(board.hole_px - (x, y), axis=1)
             k = int(np.argmin(d))
             row, col = board.holes[k] if d[k] < END_SNAP else (None, None)
-            ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "blob": i})
-    return ends, labels
+            kind = "removed" if grey_a[blob].mean() > grey_b[blob].mean() else "placed"
+            ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "kind": kind, "blob": wire})
+    return ends, wire_labels
 
 
 def colour_fractions(image, mask) -> dict[str, float]:
@@ -124,16 +138,16 @@ def colour_fractions(image, mask) -> dict[str, float]:
 
 
 def analyse(board, before, after, expect_rows: list[int], wire_colour: str | None) -> tuple[CheckResult, dict]:
-    """Compare two warped boards. Returns the result and an overlay (mask + wire ends) for drawing."""
+    """Compare two warped boards. Returns the result and an overlay (mask + plugs) for drawing."""
     mask = change_mask(before, after)
     overlay = {"mask": mask, "ends": []}
     if mask.mean() > TOO_MUCH:
         return CheckResult("unsure", "Something big is in the way. Move your hand away, then say done."), overlay
-    ends, labels = wire_ends(board, mask)
+    ends, wire_labels = plug_ends(board, mask, before, after)
     overlay["ends"] = ends
-    placed = [e for e in ends if e["row"] is not None]
+    placed = [e for e in ends if e["row"] is not None and e["kind"] == "placed"]
     if not placed:
-        return CheckResult("unsure", "I don't see a wire end in the board yet. Check it's pushed in, then say done."), overlay
+        return CheckResult("unsure", "I don't see a wire plugged in yet. Check it's pushed in, then say done."), overlay
 
     rows_found = sorted({e["row"] for e in placed})
     if set(rows_found) != set(expect_rows):
@@ -142,13 +156,13 @@ def analyse(board, before, after, expect_rows: list[int], wire_colour: str | Non
         if len(expect_rows) == 1 and len(placed) == 1:
             detail = f"That went into row {placed[0]['row']}, it should be row {want}."
         elif wrong:
-            detail = f"I see a wire end in row {' and '.join(str(e['row']) for e in wrong)}, it should be row {want}."
+            detail = f"I see a wire in row {' and '.join(str(e['row']) for e in wrong)}, it should be row {want}."
         else:
-            detail = f"I only see a wire end in row {' and '.join(map(str, rows_found))}, it should be row {want}."
+            detail = f"I only see a wire in row {' and '.join(map(str, rows_found))}, it should be row {want}."
         return CheckResult("fail", detail, rows_found), overlay
 
     if wire_colour:
-        wire = np.isin(labels, list({e["blob"] for e in placed}))
+        wire = np.isin(wire_labels, [e["blob"] for e in placed])
         fractions = colour_fractions(after, wire)
         if fractions.get(wire_colour, 0.0) < COLOUR_MIN:
             seen = max(fractions, key=fractions.get)
@@ -171,6 +185,9 @@ def draw_result(board, warped, overlay: dict | None, expect_rows=()):
                 cv2.circle(warped, (int(e["x"]), int(e["y"])), 5, (200, 200, 200), 1)
                 continue
             x, y = board.hole_px[board.holes.index((e["row"], e["col"]))].astype(int)
+            if e.get("kind") == "removed":
+                cv2.circle(warped, (x, y), int(0.45 * PITCH), (160, 160, 160), 1)
+                continue
             good = e["row"] in expect_rows
             colour = (0, 200, 0) if good else (0, 0, 255)
             cv2.circle(warped, (x, y), int(0.45 * PITCH), colour, 2)
@@ -208,30 +225,42 @@ class Vision:
         self._event_cv = threading.Condition()
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
-        threading.Thread(target=self._recalibrate_loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
 
     # --- automatic watching ---------------------------------------------------------
 
     def _stable_board(self):
-        """(still-period id, warped board) if the board is currently still, else (None, None)."""
+        """(still-period id, raw frame) if the board is currently still, else (None, None)."""
         with self._lock:
-            if self._warped is None or time.time() - self._still_since < STILL_FOR:
+            if self._raw is None or time.time() - self._still_since < STILL_FOR:
                 return None, None
-            return self._still_since, self._warped.copy()
+            return self._still_since, self._raw.copy()
+
+    def _aligned(self, raw):
+        """Warp a raw frame to the board, re-calibrating from it first (the board shifts when a wire
+        is pushed in). Keeps the current grid if calibration fails (e.g. a hand is in the way)."""
+        import calibrate
+        try:
+            board, _ = calibrate.auto_calibrate(raw, self.board.rows)
+            self.board = board
+        except calibrate.CalibrationError:
+            pass
+        return self.board.warp(raw)
 
     def _watch_loop(self):
-        import cv2
+        import calibrate
         seen = None                               # still period already handled
         while True:
             time.sleep(0.1)
             if self._busy:
                 continue
-            period, board_img = self._stable_board()
+            period, raw = self._stable_board()
             if period is None or period == seen:
                 continue
+            board_img = self._aligned(raw)
             if self.baseline is None:
                 self.baseline, seen = board_img, period
+                calibrate.save_board(self.board)
                 self.status = "watching the board"
                 continue
             mask = change_mask(self.baseline, board_img)
@@ -239,34 +268,48 @@ class Vision:
                 self.status = "something big is over the board"
                 seen = period                     # wait for the next movement
                 continue
-            ends, _ = wire_ends(self.board, mask)
-            placed = [e for e in ends if e["row"] is not None]
-            if not placed:
-                self.baseline, seen = board_img, period    # no wire change: absorb lighting drift
+            ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
+            ends = [e for e in ends if e["row"] is not None and not self._near_known_wire(e)]
+            if not ends:
+                self.baseline, seen = board_img, period    # cable moved / lighting drift: absorb it
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
-            period2, board2 = self._stable_board()
+            period2, raw2 = self._stable_board()
             if period2 != period:
                 continue                                    # moved again; re-evaluate when still
-            ends2, _ = wire_ends(self.board, change_mask(self.baseline, board2))
-            holes = sorted({f"{e['col']}{e['row']}" for e in placed})
-            if holes != sorted({f"{e['col']}{e['row']}" for e in ends2 if e["row"] is not None}):
+            board2 = self.board.warp(raw2)
+            ends2, _ = plug_ends(self.board, change_mask(self.baseline, board2), self.baseline, board2)
+            ends2 = [e for e in ends2 if not self._near_known_wire(e)]
+            key = lambda es: sorted((e["kind"], f"{e['col']}{e['row']}") for e in es if e["row"] is not None)
+            if key(ends) != key(ends2):
                 continue
-            # removed if the changed area got brighter (white board showing again), placed otherwise
-            grey_before = cv2.cvtColor(self.baseline, cv2.COLOR_BGR2GRAY)[mask].mean()
-            grey_after = cv2.cvtColor(board2, cv2.COLOR_BGR2GRAY)[mask].mean()
-            kind = "removed" if grey_after > grey_before + 10 else "placed"
-            event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "holes": holes,
-                     "rows": sorted({e["row"] for e in placed}), "before": self.baseline, "after": board2,
-                     "overlay": {"mask": mask, "ends": ends}}
-            self.wires = self.wires - set(holes) if kind == "removed" else self.wires | set(holes)
+            placed = sorted({f"{e['col']}{e['row']}" for e in ends if e["kind"] == "placed"})
+            removed = sorted({f"{e['col']}{e['row']}" for e in ends if e["kind"] == "removed"})
+            kind = "moved" if placed and removed else "placed" if placed else "removed"
+            event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
+                     "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed"}),
+                     "before": self.baseline, "after": board2, "overlay": {"mask": mask, "ends": ends}}
+            self.wires = (self.wires - set(removed)) | set(placed)
             self.overlay = event["overlay"]
-            self.status = f"wire {kind} {'from' if kind == 'removed' else 'at'} {', '.join(holes)}"
+            parts = ([f"placed at {', '.join(placed)}"] if placed else []) + \
+                    ([f"removed from {', '.join(removed)}"] if removed else [])
+            self.status = "wire " + " and ".join(parts)
             print(f"[{event['t']}] {self.status}", flush=True)
             self.baseline, seen = board2, period
+            calibrate.save_board(self.board)
             with self._event_cv:
                 self.events.append(event)
                 self._event_cv.notify_all()
+
+    def _near_known_wire(self, end: dict) -> bool:
+        """A 'placement' within a hole of a wire already in the board is that wire's cable swinging."""
+        if end["kind"] != "placed" or end["row"] is None:
+            return False
+        for hole in self.wires:
+            x, y = self.board.hole_px[self.board.holes.index((int(hole[1:]), hole[0]))]
+            if np.hypot(end["x"] - x, end["y"] - y) < 1.5 * PITCH:
+                return True
+        return False
 
     def wait_for_event(self, timeout: float | None = None, kind: str | None = None) -> dict | None:
         """Block until the next event (optionally of one kind); None on timeout."""
@@ -287,37 +330,17 @@ class Vision:
                            timeout: float | None = 120) -> CheckResult | None:
         """Hands-free check: wait for the next wire placement and judge it. None on timeout."""
         self.expect_rows = list(expect_rows)
-        event = self.wait_for_event(timeout, kind="placed")
-        if event is None:
-            return None
+        deadline = None if timeout is None else time.time() + timeout
+        while True:
+            event = self.wait_for_event(None if deadline is None else max(0.0, deadline - time.time()))
+            if event is None:
+                return None
+            if event["placed"]:
+                break
         result, overlay = analyse(self.board, event["before"], event["after"], expect_rows, wire_colour)
         result.frame = self._save(draw_result(self.board, event["after"].copy(), overlay, expect_rows), result.status)
         self.overlay, self.status = overlay, result.detail
         return result
-
-    def _recalibrate_loop(self):
-        """Re-snap the grid if the board (or camera) has moved."""
-        import cv2
-        import calibrate
-        while True:
-            time.sleep(RECAL_EVERY)
-            if self._busy or not self.is_still():
-                continue
-            frame = self.camera.latest()
-            if frame is None:
-                continue
-            try:
-                new, _ = calibrate.auto_calibrate(frame, self.board.rows)
-            except calibrate.CalibrationError:
-                continue
-            old = self.board
-            moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), old.H).reshape(-1, 2)
-            shift = float(np.linalg.norm(moved - old.hole_px, axis=1).mean()) / PITCH
-            if shift > RECAL_SHIFT:
-                self.board = new
-                self.baseline = None                      # old baseline was warped with the old grid
-                calibrate.save_board(new)
-                self.status = f"board moved {shift:.1f} holes: recalibrated"
 
     def _loop(self):
         import cv2

@@ -23,6 +23,12 @@ BOARD = Board(CORNERS, ROWS)
 RED, BLUE = (40, 40, 210), (200, 90, 30)
 
 
+def plug(img, x, y):
+    """A black Dupont housing seen from above, centred on the hole."""
+    h = int(0.55 * PITCH)
+    cv2.rectangle(img, (x - h, y - h), (x + h, y + h), (25, 25, 25), -1)
+
+
 def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
     """Synthetic camera frame of the board, optionally with a jumper from (row, c) to the rail."""
     w, h = BOARD.size
@@ -31,8 +37,8 @@ def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
         cv2.rectangle(flat, (x - 3, y - 3), (x + 3, y + 3), (60, 60, 60), -1)
     if wire_row:
         x, y = BOARD.hole_xy(wire_row, "c")
-        cv2.line(flat, (x, y), (x, y + 6 * PITCH), colour, 7)          # towards the rail below column a
-        cv2.circle(flat, (x, y), 5, colour, -1)
+        cv2.line(flat, (x, y), (x, y + 6 * PITCH), colour, 7)          # cable towards the rail below column a
+        plug(flat, x, y)
     if hand:
         cv2.ellipse(flat, (w // 2, h // 2), (w // 3, h // 2), 0, 0, 360, (120, 160, 210), -1)
     cam = cv2.warpPerspective(flat, BOARD.H_inv, CAM, borderValue=(40, 40, 40))
@@ -84,6 +90,8 @@ def test_wire_lying_on_board_both_ends():
     (x1, y1), (x2, y2) = BOARD.hole_xy(13, "c"), BOARD.hole_xy(20, "c")
     import cv2 as _cv2
     _cv2.line(flat, (int(x1), int(y1)), (int(x2), int(y2)), RED, 7)
+    plug(flat, int(x1), int(y1))
+    plug(flat, int(x2), int(y2))
     result, overlay = analyse(BOARD, before, flat, [13, 20], "red")
     assert result.status == "pass", (result, overlay["ends"])
 
@@ -128,7 +136,18 @@ def test_watcher_reports_placement_and_removal():
     cam.scene = "empty"
     e = v.wait_for_event(timeout=6)
     assert e is not None and e["kind"] == "removed", e and e["kind"]
+    assert not e["placed"], e["placed"]
     assert not v.wires, v.wires
+
+
+def test_cable_moving_is_not_a_placement():
+    before = BOARD.warp(camera_image(wire_row=13, seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    x, y = BOARD.hole_xy(13, "c")
+    cv2.line(flat, (x, y), (x + 4 * PITCH, y + 6 * PITCH), RED, 7)    # same plug, cable swung sideways
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, [13], "red")
+    assert result.status != "fail", (result, overlay["ends"])     # never blames a different row
 
 
 def test_calibration_round_trip():
