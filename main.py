@@ -109,6 +109,10 @@ def main():
             run_quietly()
     except KeyboardInterrupt:
         pass
+    finally:
+        close = getattr(voice, "close", None)
+        if close:
+            close()
     print("\nbye")
 
 

@@ -2,9 +2,9 @@
 
 Landing page → "Start building" → the bench: a floating chat card on the left (mic + text box) and the board on a green cutting mat.
 
-The live backend listens hands-free through the computer's microphone by default. Speak when the status says
-“Listening”; a pause of about a second sends the turn. Click the mic to pause/resume capture. Typed input can
-be sent at any time. The mic ignores the tutor's speech and a short echo tail. Microphone failures show a
+The live backend listens hands-free through the computer's microphone by default. A pause of about a second
+sends the turn. On macOS, speak while the tutor talks to interrupt it; capture/playback use native echo cancellation.
+Click the mic to pause/resume capture. Typed input can be sent at any time and also stops speech. Microphone failures show a
 retry hint and leave typing available. `--ptt` retains manual Space/mic recording.
 
 ```bash
@@ -23,7 +23,7 @@ The UI is driven by the tutor's (or `fsm.py`'s) log lines, the same dicts writte
 
 | Route | Direction | Body |
 | --- | --- | --- |
-| `GET /api/hello` | → UI | `{"project": {"steps": project.STEPS, "predicted": 0.99}, "browser_tts": false, "server_stt": true, "hands_free": true, "camera": true}` |
+| `GET /api/hello` | → UI | `{"project": {"steps": project.STEPS, "predicted": 0.99}, "browser_tts": false, "server_stt": true, "hands_free": true, "barge_in": true, "camera": true}` |
 | `GET /events` (SSE) | → UI | `{"type": "log", "line": <log line>}`, `{"type": "status", "waiting": true, "hands_free": true, "mic_state": "listening", "mic_paused": false}`; also `speaking` and `mic_error` |
 | `POST /api/input` | UI → | `{"text": "done"}`, `{"mic": "pause" \| "resume"}` in hands-free mode, or `{"ptt": "start" \| "stop"}` in manual mode |
 | `GET /camera.mjpg` | → UI | optional MJPEG of the phone camera with the hole grid |

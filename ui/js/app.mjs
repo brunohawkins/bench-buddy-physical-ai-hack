@@ -15,7 +15,7 @@ createHero({ stage: $("heroStage"), boardEl: $("heroBoard"), chute: $("chute"), 
 const ui = {
   started: false, transport: null, steps: [], stepI: -1,
   fsm: "IDLE", muted: false, browserTts: true, serverStt: false, camera: false,
-  handsFree: false, micPaused: false, micState: "idle", micError: "", speaking: false,
+  handsFree: false, bargeIn: false, micPaused: false, micState: "idle", micError: "", speaking: false,
   lastLocal: "", waiting: false, thinking: false,
 };
 
@@ -138,6 +138,7 @@ function applyHello(h) {
   ui.browserTts = !!h.browser_tts;
   ui.serverStt = !!h.server_stt;
   ui.handsFree = !!h.hands_free;
+  ui.bargeIn = !!h.barge_in;
   ui.camera = !!h.camera;
   $("camBtn").hidden = !ui.camera;
   updateMic();
@@ -175,7 +176,7 @@ function status(ev) {
 }
 
 function updateMic() {
-  const active = ui.waiting && !ui.micPaused && !ui.speaking;
+  const active = ui.waiting && !ui.micPaused && (ui.bargeIn || !ui.speaking);
   $("mic").classList.toggle("your-turn", ui.handsFree ? active && ["listening", "hearing"].includes(ui.micState) : ui.waiting);
   $("mic").classList.toggle("paused", ui.handsFree && ui.micPaused);
   if (!ui.handsFree) {
@@ -192,8 +193,9 @@ function updateMic() {
   $("mic").classList.toggle("on", active && ui.micState === "hearing");
   $("hint").textContent = ui.micError || (ui.micPaused
     ? "Mic paused · tap the mic to resume · Enter sends"
+    : ui.bargeIn ? "Speak naturally to interrupt · tap the mic to pause · Enter sends"
     : "Speak naturally · tap the mic to pause · Enter sends");
-  if (ui.speaking) return setStatus("Speaking…");
+  if (ui.speaking) return setStatus(ui.bargeIn && !ui.micPaused ? "Speaking · you can interrupt" : "Speaking…");
   if (ui.waiting) {
     const labels = { starting: "Preparing microphone…", calibrating: "Preparing microphone…",
       listening: "Listening · speak naturally", hearing: "Listening…", transcribing: "Transcribing…", idle: "Your turn…" };

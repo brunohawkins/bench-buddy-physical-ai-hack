@@ -31,9 +31,12 @@ For the radar demo with the phone camera and spoken guidance:
 .venv/bin/python main.py --fake bench --ui
 ```
 
-The live UI listens automatically through the computer's microphone when it is your turn. Speak normally,
+The live UI listens automatically through the computer's microphone. Speak normally,
 then pause for about a second to send the utterance; no Space press is needed. The mic button pauses/resumes
-listening, and typing still works. Listening pauses while Bench Buddy speaks and resumes after its echo fades.
+listening, and typing still works. On macOS, speaking interrupts the tutor, including cached phrases.
+Capture and playback share Apple's echo-cancelling audio engine; the first launch compiles a small Swift helper
+with the Xcode Command Line Tools. `VOICE_BARGE_IN=0` restores the original audio path (which listens between
+replies); other platforms use that path too. An interrupted reply cannot advance a placement check.
 Microphone errors appear beside the input with a retry option. Add `--ptt` to use manual Space/mic recording.
 Fake voice still uses browser push-to-talk; the UI now needs the running Python backend. Restart the app after updating it and
 refresh the page to load the new voice controls.
@@ -53,6 +56,11 @@ checks; full circuit checking needs the vision model. Camera corrections also ap
 step. Old camera descriptions expire instead of being treated as a current view. LED checks include an extra
 close-up around the requested rows and distinguish a visible LED body from clearly resolved leg holes. If the
 body hides the entry points, angle the camera slightly to expose both legs; an unlit LED still counts as present.
+LED placement requires agreement between the circuit check and a separate reading that cannot see the
+target rows or earlier guesses. Magnified rulers stay outside the holes so they don't cover the metal legs.
+Clear wrong rows, shorts and wrong halves still fail; conflicting/hidden entry points request a clearer view.
+There is no adjacent-row tolerance. Camera capture requests 3840×2160, reports the resolution negotiated by
+the device, and accepts `CAMERA_WIDTH`/`CAMERA_HEIGHT` overrides. More pixels cannot reveal a hidden insertion point.
 
 Run the offline regression suite (fake model responses, synthetic camera frames and captured speech text):
 

@@ -40,6 +40,7 @@ class UI:
             "browser_tts": silent,
             "server_stt": hasattr(voice, "record_start") and hasattr(voice, "record_stop"),
             "hands_free": bool(getattr(voice, "hands_free", False)),
+            "barge_in": bool(getattr(voice, "barge_in", False)),
             "camera": hasattr(vision, "camera") and hasattr(vision, "board"),
             "session": self.session,
         }
@@ -96,6 +97,10 @@ class UI:
             if self.mic_control:
                 self.mic_control(message["mic"] == "resume")
         else:
+            if message.get("text", "").strip() or message.get("ptt") == "start":
+                interrupt = getattr(self, "interrupt", None)
+                if interrupt:
+                    interrupt()
             self.inbox.put({k: v for k, v in message.items() if k in ("text", "ptt")})
         return True
 
@@ -228,6 +233,7 @@ class UIVoice:
         self._cancel = None
         self._requests: queue.Queue = queue.Queue()
         self.ui.mic_control = self.set_mic_enabled
+        self.ui.interrupt = self.interrupt
         if self.hands_free:
             threading.Thread(target=self._speech_worker, daemon=True, name="ui-speech").start()
 
@@ -275,7 +281,7 @@ class UIVoice:
                                                    "then tap the mic to retry. You can still type."})
                 continue
             with self._lock:
-                if text and self._cancel is cancel and not cancel.is_set():
+                if self._cancel is cancel and not cancel.is_set():
                     self.ui.inbox.put({"text": text, "_voice_cancel": cancel})
 
     def close(self) -> None:
@@ -283,6 +289,25 @@ class UIVoice:
             if self._cancel:
                 self._cancel.set()
             self._requests.put(None)
+        close = getattr(self.inner, "close", None)
+        if close:
+            close()
+
+    @property
+    def on_speech_start(self):
+        return getattr(self.inner, "on_speech_start", None)
+
+    @on_speech_start.setter
+    def on_speech_start(self, callback):
+        self.inner.on_speech_start = callback
+
+    def interrupt(self):
+        stop = getattr(self.inner, "interrupt", None)
+        if stop:
+            stop()
+        callback = self.on_speech_start
+        if callback:
+            callback()
 
     def listen(self) -> str:
         with self._lock:
@@ -298,6 +323,7 @@ class UIVoice:
                         cancel = msg["_voice_cancel"]
                         if cancel is not self._cancel or cancel.is_set():
                             continue
+                    return msg["text"].strip()
                 if msg.get("text", "").strip():
                     return msg["text"].strip()
                 if self.hands_free:                 # Space cannot start a second recording in automatic mode
@@ -319,7 +345,7 @@ class UIVoice:
     def say(self, text: str) -> None:
         self.ui.emit({"type": "status", "speaking": True})
         try:
-            self.inner.say(text)
+            return self.inner.say(text)
         finally:
             self.ui.emit({"type": "status", "speaking": False})
 

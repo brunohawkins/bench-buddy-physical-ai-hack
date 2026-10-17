@@ -1,7 +1,7 @@
 """Hands-free (or push-to-talk) speech-to-text and text-to-speech. Owner: L.
 
 Hands-free: the mic stays open and TurnDetector finds where an utterance starts and ends from loudness against
-the room's noise floor. The mic is ignored while Bench Buddy is speaking, so it doesn't hear itself.
+the room's noise floor. macOS voice-processing I/O removes speaker echo so speech can interrupt TTS.
 
 TTS is tuned for latency: ElevenLabs Flash streams raw PCM, which plays chunk by chunk as it arrives and is
 cached on disk at the same time. Cached phrases play straight from PCM with no decoding.
@@ -11,6 +11,7 @@ import io
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import wave
@@ -125,6 +126,13 @@ class Voice:
         self.hands_free = hands_free and self.stt is not None
         self._capture = None                        # (audio queue, cancellation event) for the current turn
         self._speaking, self._mute_until, self._gap_sent = False, 0.0, False
+        self._play_cancel = threading.Event()
+        self._device_lock = threading.Lock()
+        self._audio_io = None
+        self._aec_requested = self.hands_free and sys.platform == "darwin" and os.environ.get("VOICE_BARGE_IN", "1") != "0"
+        self.barge_in = self._aec_requested
+        self.on_speech_start = None
+        self._fallback_process = None
         self._detector = TurnDetector(min_rms=float(os.environ.get("VAD_MIN_RMS", 300)),
                                       end_silence=float(os.environ.get("VAD_END_SILENCE", 1.0)))
         self.tts = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY"))
@@ -194,12 +202,14 @@ class Voice:
         if self._detector.floor is None:
             print("[voice] listening for room noise...")
         report("calibrating" if self._detector.floor is None else "listening")
-        announced, pending, waited = False, "", 0
+        announced, pending, waited, started = False, "", 0, False
         wait_frames = round(CONTINUE_FOR * 1000 / 30)
         while not cancel.is_set():
             try:
                 frame = audio.get(timeout=0.1)
             except queue.Empty:
+                if getattr(self, "_audio_io", None):
+                    self._audio_io.check()
                 continue
             if frame is None:                        # we were speaking: forget anything half-heard
                 self._detector.reset()
@@ -210,6 +220,14 @@ class Voice:
                 print("  (listening)")
                 announced = True
             utterance = self._detector.feed(frame)
+            # Require enough voiced audio to survive the turn detector's blip filter.
+            # A chair click must not cancel speech and leave the controller waiting for a nonexistent turn.
+            if self._detector.in_speech and self._detector.speech >= self._detector.min_speech and not started:
+                started = True
+                self.interrupt()
+                callback = getattr(self, "on_speech_start", None)
+                if callback:
+                    callback()
             report("hearing" if self._detector.in_speech else
                    "calibrating" if self._detector.floor is None else "listening")
             if utterance is None:
@@ -219,13 +237,14 @@ class Voice:
                         print(f"  heard: {pending}")
                         return pending
                 continue
+            started = False
             report("transcribing")
             text = self._transcribe(utterance)
             if cancel.is_set():
                 return ""                           # never submit a transcript from a cancelled turn
             report("listening")
             if not text:
-                continue
+                return ""  # release an interrupted response even when STT couldn't recover words
             pending = f"{pending} {text}".strip() if pending else text
             if unfinished(pending):
                 print(f"  heard so far: {pending}")
@@ -250,13 +269,25 @@ class Voice:
         self.last_stt_ms = round((time.perf_counter() - t0) * 1000)
         return text
 
-    def say(self, text: str) -> None:
+    def interrupt(self) -> None:
+        """Stop buffered output immediately, including cached phrases and the offline fallback."""
+        if hasattr(self, "_play_cancel"):
+            self._play_cancel.set()
+        if getattr(self, "_audio_io", None):
+            self._audio_io.abort()
+        process = getattr(self, "_fallback_process", None)
+        if process is not None and process.poll() is None:
+            process.terminate()
+
+    def say(self, text: str) -> bool:
         print(f"buddy> {text}", flush=True)
+        self._play_cancel = threading.Event()
         self._speaking = True
         try:
             self._say(text)
         finally:
             self._speaking, self._mute_until = False, time.time() + MUTE_TAIL
+        return not self._play_cancel.is_set()
 
     def _say(self, text: str) -> None:
         t0 = time.perf_counter()
@@ -267,11 +298,22 @@ class Voice:
         try:
             pcm = self._play_stream(self._synth(text), t0)
         except Exception as e:
+            if self._play_cancel.is_set():
+                return
             print(f"[voice] TTS failed ({e!r}), using say")
             self.last_latency_ms = None
-            mac_say(text)
+            self._fallback_process = subprocess.Popen(["say", text])
+            try:
+                while self._fallback_process.poll() is None:
+                    if self._play_cancel.wait(.03):
+                        self._fallback_process.terminate()
+                        break
+                self._fallback_process.wait(timeout=2)
+            finally:
+                self._fallback_process = None
             return
-        self._write_cache(path, pcm)
+        if not self._play_cancel.is_set():
+            self._write_cache(path, pcm)
 
     def warm_cache(self, phrases: list[str]) -> None:
         """Pre-generate fixed phrases at startup so they play instantly."""
@@ -293,8 +335,23 @@ class Voice:
 
     def _mic(self) -> None:
         """Open the mic once and leave it running, so the first word isn't clipped by device start-up."""
+        lock = getattr(self, "_device_lock", None)
+        if lock is None:  # also supports small offline device stubs
+            self._open_mic()
+        else:
+            with lock:
+                self._open_mic()
+
+    def _open_mic(self) -> None:
         if self._mic_stream is not None:
-            return
+            if getattr(self, "_audio_io", None):
+                try:
+                    self._audio_io.check()
+                except RuntimeError:
+                    self._audio_io.close()
+                    self._audio_io, self._mic_stream = None, None
+            if self._mic_stream is not None:
+                return
         import sounddevice as sd
 
         def on_audio(data, frames, t, status):
@@ -306,7 +363,8 @@ class Voice:
             audio, cancel = capture
             if cancel.is_set():
                 return
-            if self._speaking or time.time() < self._mute_until:
+            echo_cancelled = getattr(self, "_audio_io", None) is not None and not getattr(self, "_fallback_process", None)
+            if not echo_cancelled and (self._speaking or time.time() < self._mute_until):
                 if not self._gap_sent:
                     self._enqueue_audio(audio, None)
                     self._gap_sent = True
@@ -314,6 +372,12 @@ class Voice:
             self._gap_sent = False
             self._enqueue_audio(audio, bytes(data))
 
+        if getattr(self, "_aec_requested", False):
+            from native_audio import MacAudio
+            self._audio_io = MacAudio(on_audio)
+            self._mic_stream = self._audio_io
+            print("[voice] echo cancellation active; speak to interrupt")
+            return
         stream = sd.RawInputStream(samplerate=MIC_RATE, channels=1, dtype="int16", blocksize=FRAME,
                                    callback=on_audio)
         try:
@@ -358,25 +422,78 @@ class Voice:
     def _play_stream(self, chunks, t0: float) -> bytes:
         """Play PCM chunks as they arrive; return everything played. Raises before any audio if the API fails."""
         import sounddevice as sd
+        if self._aec_requested:
+            self._mic()
+        # Synthesis may block on the network. Playback cancellation must not wait for its next chunk.
+        incoming = queue.Queue(maxsize=8)
+        cancel = self._play_cancel
+        def produce():
+            def put(value):
+                while not cancel.is_set():
+                    try:
+                        incoming.put(value, timeout=.03)
+                        return True
+                    except queue.Full:
+                        pass
+                return False
+            try:
+                for chunk in chunks:
+                    if not put(chunk):
+                        break
+            except Exception as exc:
+                put(exc)
+            finally:
+                put(None)
+                close = getattr(chunks, "close", None)
+                if close:
+                    close()
+        threading.Thread(target=produce, daemon=True, name="tts-stream").start()
         played, carry, stream = bytearray(), b"", None
         try:
-            for chunk in chunks:
+            while not cancel.is_set():
+                try:
+                    chunk = incoming.get(timeout=.03)
+                except queue.Empty:
+                    continue
+                if chunk is None:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
                 if not chunk:
                     continue
-                if stream is None:       # open only once audio exists, so an API error falls back cleanly
+                if stream is None and self._audio_io is None:
                     stream = sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16")
                     stream.start()
+                if not played:
                     self.last_latency_ms = round((time.perf_counter() - t0) * 1000)
                 data = carry + chunk
                 cut = len(data) - len(data) % 2      # chunks can split a 16-bit sample
-                stream.write(data[:cut])
+                for pos in range(0, cut, 1320):     # 30 ms blocks, even for a whole cached phrase
+                    if cancel.is_set():
+                        break
+                    block = data[pos:min(pos + 1320, cut)]
+                    if self._audio_io:
+                        self._audio_io.write(block, cancel)
+                    else:
+                        stream.write(block)
                 carry = data[cut:]
                 played += data[:cut]
         finally:
+            if self._audio_io:
+                if cancel.is_set():
+                    self._audio_io.abort()
+                else:
+                    self._audio_io.drain(cancel)
             if stream is not None:
-                stream.stop()            # stop() drains the buffer before returning
+                stream.abort() if cancel.is_set() else stream.stop()
                 stream.close()
         return bytes(played)
+
+    def close(self):
+        self.interrupt()
+        close = getattr(self._mic_stream, "close", None)
+        if close:
+            close()
 
 
 class FakeVoice:

@@ -51,6 +51,15 @@ def test_wrong_hole_has_fix_in_event_and_ui_state(scene, monkeypatch):
     assert scene.state()["fix"] == event["fix"]
 
 
+def test_saved_startup_grid_requires_two_fresh_agreeing_fits(scene, monkeypatch):
+    scene._calibration_valid, scene.grid = False, "uncertain"
+    monkeypatch.setattr(calibrate, "auto_calibrate", lambda *a, **kw: (BOARD, {"holes": BOARD.rows * 10}))
+    scene._aligned(scene._raw)
+    assert not scene._calibration_valid and scene.grid == "uncertain"
+    scene._aligned(scene._raw)
+    assert scene._calibration_valid and scene.grid == "aligned"
+
+
 def test_activity_updates_preserve_fault_and_observation_fields(scene, monkeypatch):
     monkeypatch.setattr(vlm, "judge", lambda *a, **kw: judgement())
     assert observe(scene)

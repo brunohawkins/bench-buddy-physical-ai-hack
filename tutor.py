@@ -52,6 +52,8 @@ class Tutor:
         self._problem = None
         self._problem_version = 0
         self._spoken_problems = {}
+        self._interrupted = threading.Event()
+        self.voice.on_speech_start = self._speech_started
 
     # --- plumbing ------------------------------------------------------------
 
@@ -69,12 +71,21 @@ class Tutor:
         if not text:
             return True
         with self._speech_lock:
+            if self._interrupted.is_set():
+                return False
             if expected_version is not None and expected_version != self._problem_version:
                 return False
-            self.voice.say(text)
+            completed = self.voice.say(text)
+            if completed is False:
+                self.log(interrupted=text)
+                return False
             self.log(said=text, tts_ms=getattr(self.voice, "last_latency_ms", None))
             self.recent.append(("buddy", text))
         return True
+
+    def _speech_started(self):
+        # The audio layer already stopped playback. Suppress the rest of this response until input arrives.
+        self._interrupted.set()
 
     def goto(self, state: str) -> None:
         if state != self.state:
@@ -92,8 +103,9 @@ class Tutor:
 
     def _speech_feed(self) -> None:
         while True:
-            self._listening.wait()
-            self._listening.clear()
+            if not getattr(self.voice, "hands_free", False):
+                self._listening.wait()
+                self._listening.clear()
             try:
                 text = self.voice.listen()
             except EOFError:
@@ -137,6 +149,12 @@ class Tutor:
                 self._problem_version += 1
             self._problem = None
             self._spoken_problems.clear()           # the same mistake after a verified fix is a new mistake
+        elif ev.get("assessment") and ev.get("grid") == "aligned" and ev.get("severity") == "warning" and self._problem:
+            # A new, uncertain view supersedes a previous confident accusation. A fresh check is still
+            # required to advance, but don't keep ordering a move based on an obsolete LED reading.
+            self._problem_version += 1
+            self._problem = None
+            self._spoken_problems.clear()
         return False
 
     def _speak_problem(self, problem: dict) -> None:
@@ -150,9 +168,9 @@ class Tutor:
             if now - self._spoken_problems.get(key, -float("inf")) < PROBLEM_COOLDOWN:
                 return
             self._spoken_problems = {k: t for k, t in self._spoken_problems.items() if now - t < PROBLEM_COOLDOWN}
-            self._spoken_problems[key] = now
             self.log(check="vision_problem", result="fail", detail=text, **problem)
-            self.say(text)
+            if self.say(text):
+                self._spoken_problems[key] = now
 
     def run(self) -> None:
         threading.Thread(target=self.voice.warm_cache, args=(self.phrases(),), daemon=True).start()
@@ -172,6 +190,8 @@ class Tutor:
             if ev["type"] == "eof":
                 return
             self.last_event = time.time()
+            if ev["type"] == "speech":
+                self._interrupted.clear()
             self.handle(ev)
             if ev["type"] == "speech":
                 self._listening.set()
@@ -224,7 +244,7 @@ class Tutor:
         """Let the tutor talk, then follow its action where the controller allows it."""
         version = self._problem_version
         out = self.brain.tutor(self.context(), ev)
-        if version != self._problem_version:
+        if version != self._problem_version or self._interrupted.is_set():
             return                                  # a camera correction made this model reply obsolete
         self.log(tutor=out["action"], llm_ms=getattr(self.brain, "last_ms", None))
         action = out["action"]
@@ -419,7 +439,7 @@ class Tutor:
             return self.measure_freq()
         else:                                        # confirm, or a meter check with no Arduino attached
             status, detail = "pass", "confirmed"
-        if version != self._problem_version:
+        if version != self._problem_version or self._interrupted.is_set():
             self.goto("STEP")
             return                                  # a problem arrived during verification; never advance past it
         self.last_check = {"step": step["id"], "result": status, "detail": detail}
@@ -430,7 +450,7 @@ class Tutor:
         if status == "pass":
             if chk["kind"] in ("vision", "look"):
                 self.say(detail, expected_version=version)
-            if version != self._problem_version:
+            if version != self._problem_version or self._interrupted.is_set():
                 self.goto("STEP")
                 return
             return self.open_step(self.step_i + 1)

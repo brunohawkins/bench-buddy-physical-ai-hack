@@ -27,8 +27,10 @@ def default_source():
 
 
 class Camera:
-    def __init__(self, source=0, width: int = 1920, height: int = 1080):
+    def __init__(self, source=0, width: int | None = None, height: int | None = None):
         import cv2
+        width = width or int(os.environ.get("CAMERA_WIDTH", "3840"))
+        height = height or int(os.environ.get("CAMERA_HEIGHT", "2160"))
         if isinstance(source, int) and sys.platform == "darwin":
             self._cap = cv2.VideoCapture(source, cv2.CAP_AVFOUNDATION)
         else:
@@ -37,6 +39,8 @@ class Camera:
             raise RuntimeError(f"can't open camera {source!r} (on macOS, check Camera permission for your terminal/editor)")
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        actual = (int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        print(f"[camera] requested {width}x{height}; device reports {actual[0]}x{actual[1]}")
         self._frame = None
         self.frame_id = 0                # increments on every new frame
         self._lock = threading.Lock()

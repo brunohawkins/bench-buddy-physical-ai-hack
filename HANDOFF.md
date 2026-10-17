@@ -218,6 +218,48 @@ covered empty-board startup, hands-free status, mic pause/resume, typed input, l
 correction cards and session reset. Camera and microphone hardware still need the user's live rehearsal.
 The circuit simulation assumes LED orientation and supply details; it supplements the vision checks.
 
+### Follow-up: interruption and LED entry-point evidence
+
+macOS hands-free voice now uses `native/voice_io.swift` through `native_audio.py`. AVAudioEngine voice processing
+shares speaker playback and microphone capture for echo cancellation. Explicitly connect the main mixer to
+the output at the microphone's rate: leaving it at the 22.05 kHz TTS rate failed on this Mac with error -10875.
+The helper compiles on first use into ignored `.audio-cache/` using Xcode Command Line Tools. No new pip packages.
+`VOICE_BARGE_IN=0` and non-macOS retain the half-duplex sounddevice path; startup/device failures surface through
+the existing UI microphone retry. `VOICE_DEBUG=1` exposes native diagnostics.
+
+The tutor's hands-free speech feed remains active while processing/replying. A valid speech onset cancels
+output before transcription; the first word is retained in preroll. Streaming synthesis runs separately so
+a network stall cannot hold playback cancellation hostage. Cached phrases play in 30 ms blocks, interrupted
+fragments are not cached, and offline `say` is terminated on explicit interruption. Follow-on replies and
+step advancement are suppressed until the interrupted input arrives. Typing interrupts too. Closing the app
+terminates its audio helper.
+
+The reported `frames/144554_fail.jpg` contains an LED dome leaning away from blurred leg entry points. A real
+API check using the independent reading returned LED present / entry holes unclear, instead of repeating
+the old c36/b37 move instruction. This does NOT establish that the physical holes were b35/c36: the saved image
+cannot support that certainty. Labelled model images no longer cover holes with dots; LED close-ups have
+external row/column rulers. Previous LED coordinates are removed from the model's earlier part list. A second
+LED reading is blind to task/target/conversation, and both readings must agree on two clearly visible holes.
+Disagreement/API failure/hidden entries gives unsure and removes guessed LED coordinates from the twin.
+Other clearly observed wiring faults still produce spoken corrections. Explicit LED row/half constraints
+also run in code after visual agreement, so a model's mistaken pass cannot forgive a shifted row or a short.
+The extra LED call adds latency. State includes `led_evidence`; verification saves raw camera frames too.
+
+Camera capture now requests 4K (configurable CAMERA_WIDTH/HEIGHT) and prints the device-negotiated resolution.
+This iPhone negotiated 1920×1440 in the local test; do not claim it supplies 4K. A saved grid used after a
+startup calibration failure is now untrusted until two fresh fits agree, including after a resolution change.
+Hardware validation: native helper received 16 kHz microphone blocks, silently played/drained PCM, and stopped
+queued playback; the cached greeting played with zero speech detections from its own echo in one local trial.
+Microphone authorization was granted (AVAuthorizationStatus=3); raw ambient audio measured ~158 RMS while
+the voice-processing path suppressed the quiet-room input to zero. Human speech through that path remains
+part of the live rehearsal, so the quiet-room playback check alone does not prove double-talk performance.
+Generated-audio/concurrency tests cover stopping before STT, cached/live/blocked synthesis, no partial cache,
+empty STT recovery and no advancement after interruption. LED tests cover supported correct/wrong rows,
+shorts, opposite halves, contradictory/hidden legs and preserving independent wrong-wire feedback.
+Human double-talk and a known correct/wrong physical LED pair still need the next live rehearsal; no accuracy
+guarantee is implied by the offline tests. For the restart, clear the board, hold it still at calibration,
+run `.venv/bin/python main.py --fake bench --ui`, and refresh the browser.
+
 ## Also before the deadline
 
 - Parthiv: live 3D view done (`ui/README.md`, "3D twin"); make the presentation.

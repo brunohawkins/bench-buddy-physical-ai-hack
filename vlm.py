@@ -72,6 +72,9 @@ An unlit LED still has a small coloured/clear dome and two thin metal legs. Seei
 the LED is present even when its legs cannot be resolved. Report "LED visible, leg holes unclear" as a warning; \
 do not call it missing or require it to glow. Any extra AFTER detail photo is a crop of the same current view; \
 use the full overview to find parts outside that crop.
+LED legs can bend sideways under the dome: follow each metal leg all the way to its insertion hole. The dome's \
+row is NOT a leg's row. For any LED placement assessment also return led_holes (the two directly visible entry \
+holes, or [] if either is obscured). Earlier LED coordinates and spoken corrections may be wrong; re-read them.
 Use severity "wrong" ONLY for a clearly visible wiring error with a specific correction. Give the observed \
 hole/rail and the intended destination in fix, naming the lead or leg unambiguously. If polarity is hidden, \
 ask them to identify the short/long leg before moving it. Use "warning" for occlusion, ambiguous holes, unknown \
@@ -87,7 +90,7 @@ Reply JSON only:
 "colour": "<colour or null>", "holes": ["d20", "+top20"]}}],
 "problem": "<anything wrong, e.g. LED legs in the same row, or null>",
 "fix": "<one concise actionable correction, or null>", "severity": "wrong"|"warning"|null,
-"grid": "aligned"|"misaligned"|"uncertain",
+"grid": "aligned"|"misaligned"|"uncertain", "led_holes": ["<visible LED entry holes, or empty>"],
 "summary": "<what just changed, one short sentence to say out loud, or empty>",
 "narration": "<two or three plain sentences describing the whole board as it is now, for someone who can't see it>"}}
 If nothing was plugged in or pulled out, "changes" is []. Still inspect the whole board: at startup the earlier \
@@ -165,7 +168,7 @@ def judge(before_crop, after_crop, board: list | None = None, context: str | Non
           timeout: float = 45, cam_before=None, cam_after=None, task=None, focus=None) -> dict:
     """What was plugged in / pulled out between two labelled crops of the same area, the updated part list
     and a plain-English narration. board: the part list from the last judge() call. Raises on API errors."""
-    known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing yet)"
+    known = json.dumps(_fresh_led_parts(board), separators=(",", ":")) if board else "(nothing yet)"
     images, names = [before_crop, after_crop], ["flattened BEFORE", "flattened AFTER"]
     if cam_before is not None and cam_after is not None:
         images, names = [cam_before, cam_after] + images, ["camera BEFORE", "camera AFTER"] + names
@@ -254,15 +257,19 @@ An optional final image is a native-resolution close-up of the requested rows, f
 An unlit LED is still present: look for its small dome and thin metal legs, not emitted light. If its body is \
 visible but its leg holes or polarity are hidden, say that explicitly and return unsure. Never say no LED is \
 present just because you cannot verify its connections. Judge from the current images, not the earlier part list.
+Follow bent LED legs to where they ENTER the plastic, never the position of the raised dome or a shadow. \
+Return led_holes: the two directly visible entry holes, or [] if either is obscured. Read the holes afresh; \
+earlier LED coordinates and spoken corrections may be wrong. If a separate blind LED reading is supplied, \
+disagreement with your own reading means unsure, not a move instruction.
 
 Reply JSON only: {{"status": "pass"|"fail"|"unsure", "detail": "<one or two short sentences to say out loud: what \
-you see and, if wrong, exactly what to move where>"}}"""
+you see and, if wrong, exactly what to move where>", "led_holes": ["<visible entry holes, or empty>"]}}"""
 
 
 def verify(image_bgr, step: str, board: list | None = None, context: str | None = None, timeout: float = 45,
            camera=None, focus=None) -> dict:
     """Does the board show this step done? -> {"status": pass|fail|unsure, "detail"}. Raises on API errors."""
-    known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing recorded yet)"
+    known = json.dumps(_fresh_led_parts(board), separators=(",", ":")) if board else "(nothing recorded yet)"
     images = [image_bgr] if camera is None else [camera, image_bgr]
     if focus is not None:
         images.append(focus)
@@ -282,8 +289,12 @@ def labelled_crop(board, warped, overlay=None, expect_rows=(), pad_rows: int = 6
     import numpy as np
     from calibrate import PITCH, TOP_COL
     BOTTOM_COL = "a" if TOP_COL == "j" else "j"
-    from vision import draw_result
-    img = draw_result(board, warped.copy(), overlay, expect_rows)
+    # Dot overlays obscured tiny metal legs and made adjacent-hole guesses look authoritative.
+    # Keep all hole pixels intact; labels sit in the margins, without highlighting the target rows.
+    img = warped.copy()
+    for c in "abcdefghij":
+        x, y = board.hole_xy(1, c)
+        cv2.putText(img, c, (x - 28, y + 4), cv2.FONT_HERSHEY_SIMPLEX, .4, (60, 60, 60), 1, cv2.LINE_AA)
     for r in range(1, board.rows + 1):                      # number every row, not just every 5th
         x, y = board.hole_xy(r, TOP_COL)
         cv2.putText(img, str(r), (x - 7, y - int(1.6 * PITCH)), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (60, 60, 60), 1, cv2.LINE_AA)
@@ -295,6 +306,100 @@ def labelled_crop(board, warped, overlay=None, expect_rows=(), pad_rows: int = 6
         x1 = min(img.shape[1], int(xs.max() + pad_rows * PITCH))
         img = img[:, x0:x1]
     return cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+
+LED_READING_PROMPT = """Independently locate the LED's two insertion holes in these CURRENT photos.
+You have no target placement: report only visible evidence. The first photo is an unmarked overview; the
+following panels show the same board with row/column rulers in the margins. No dots cover the holes.
+An LED dome may lean several rows away from its legs. Trace BOTH thin metal legs to the holes where they
+actually enter the plastic. Do not use the dome's centre, its shadow, the ends nearest the dome, or a nearby
+resistor's leg. Count from visible neighbouring empty holes and cross-check the board's printed numbers.
+If an entry point is blurred, hidden, between two possible holes, or the rulers disagree with printing, mark
+entries_visible false. Do not guess a pair of adjacent holes just because that seems likely.
+Return JSON: {"present": true|false|null, "entries_visible": true|false,
+"holes": ["d12", "e14"], "grid": "aligned"|"misaligned"|"uncertain",
+"evidence": "describe each metal leg's visible path and its entry point; say what prevents certainty"}.
+The example coordinates describe the format only. holes must be [] unless both entry points are clear.
+Do not infer LED polarity or whether the circuit is correct."""
+
+
+def hole_detail(board, warped, rows):
+    """Magnified half-board panels with rulers OUTSIDE the image, preserving every leg/entry pixel."""
+    import cv2
+    import numpy as np
+    from calibrate import PITCH
+    rows = [r for r in rows if 1 <= r <= board.rows]
+    if not rows:
+        rows = list(range(1, board.rows + 1))
+    lo, hi = max(1, min(rows) - 5), min(board.rows, max(rows) + 5)
+    x0 = board.hole_xy(lo, "a")[0] - PITCH // 2
+    x1 = board.hole_xy(hi, "a")[0] + PITCH // 2
+    panels = []
+    for cols in ("abcde", "fghij"):
+        y0 = board.hole_xy(lo, cols[0])[1] - PITCH // 2
+        y1 = board.hole_xy(lo, cols[-1])[1] + PITCH // 2
+        crop = cv2.resize(warped[y0:y1, x0:x1], None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        panel = cv2.copyMakeBorder(crop, 50, 50, 50, 50, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        for row in range(lo, hi + 1):
+            x = round((board.hole_xy(row, cols[0])[0] + board.offsets[row][0] - x0) * 4 + 50)
+            for y in (32, panel.shape[0] - 15):
+                cv2.putText(panel, str(row), (x - 14, y), cv2.FONT_HERSHEY_SIMPLEX, .65, (0, 0, 0), 1, cv2.LINE_AA)
+        for col in cols:
+            y = (board.hole_xy(lo, col)[1] - y0) * 4 + 50
+            for x in (15, panel.shape[1] - 30):
+                cv2.putText(panel, col, (x, y + 7), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 0, 0), 1, cv2.LINE_AA)
+        panels.append(panel)
+    return np.vstack(panels)
+
+
+def read_led(board, warped, rows, camera=None):
+    """A second reading, blind to the desired placement, conversation and earlier model coordinates."""
+    images = [warped if camera is None else camera, hole_detail(board, warped, rows)]
+    out = _ask(LED_READING_PROMPT, images, timeout=30)
+    if not isinstance(out, dict):
+        raise ValueError("invalid LED evidence")
+    holes = out.get("holes", [])
+    if not isinstance(holes, list) or any(not isinstance(h, str) or not re.fullmatch(r"[a-j][1-9][0-9]*", h) for h in holes):
+        raise ValueError("invalid LED holes")
+    if any(int(h[1:]) > board.rows for h in holes):
+        raise ValueError("LED hole outside board")
+    out["certain"] = (out.get("present") is True and out.get("entries_visible") is True
+                      and out.get("grid") == "aligned" and len(holes) == 2 and len(set(holes)) == 2)
+    return out
+
+
+def led_agrees(result, evidence):
+    """No +/- one-row tolerance. Two independent, clear readings must name the same physical holes."""
+    return bool(evidence and evidence.get("certain") and isinstance(result.get("led_holes"), list)
+                and len(result["led_holes"]) == 2 and sorted(result["led_holes"]) == sorted(evidence["holes"]))
+
+
+LED_UNCLEAR = ("I can't reliably distinguish the LED's two entry holes in this view. "
+               "Leave it in place, clear your hands, and angle the camera so both legs entering the board are visible; "
+               "then ask me to check again.")
+
+
+def _fresh_led_parts(parts):
+    # Retain identity/presence, but don't reinforce an earlier one-row error as established fact.
+    return [{**part, "holes": []} if part.get("part") == "led" else part for part in (parts or [])]
+
+
+def led_position_error(step, holes):
+    """After independent visual agreement, enforce explicit LED row/half constraints in code."""
+    if not re.search(r"\bled\b", step, re.I) or len(holes) != 2:
+        return None
+    expected = step_rows(step)
+    if len(expected) != 2 or any(not re.fullmatch(r"[a-j]\d+", h) for h in holes):
+        return None
+    observed = sorted(int(h[1:]) for h in holes)
+    split = (holes[0][0] <= "e") != (holes[1][0] <= "e")
+    same_half = "same half" in step.lower()
+    if observed != expected or (same_half and split):
+        return (f"The LED's visible entry holes are {holes[0]} and {holes[1]}. "
+                f"This step needs one leg in row {expected[0]} and one in row {expected[1]}"
+                + (" on the same half of the board" if same_half else "")
+                + ". Identify the long and short legs before reseating them as instructed.")
+    return None
 
 
 if __name__ == "__main__":

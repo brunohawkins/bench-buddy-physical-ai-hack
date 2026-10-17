@@ -379,6 +379,7 @@ class Vision:
         import calibrate
         self.camera = camera
         self.persist = persist                    # write calib.json (off in tests)
+        self._calibration_valid = True
         if board is None:
             # Always calibrate fresh from the camera; the saved file is only a fallback, so a stale or
             # wrong calib.json can never poison a run.
@@ -395,7 +396,8 @@ class Vision:
                 board = calibrate.load()
                 if board.rows != rows:
                     raise calibrate.CalibrationError(f"{e}; and calib.json is for a {board.rows}-row board") from e
-                print(f"auto-calibration failed ({e}); using calib.json", flush=True)
+                self._calibration_valid = False
+                print(f"auto-calibration failed ({e}); waiting to validate the saved grid against the camera", flush=True)
         self.board = board
         self._busy = False                        # true during a check: don't re-snap mid-comparison
         self.expect_rows: list[int] = []          # highlighted on the live view during a check
@@ -421,10 +423,11 @@ class Vision:
         self._event_cv = threading.Condition()
         self._event_cursor = threading.local()     # a slow consumer must not lose events while speaking
         self.parts: list[dict] = []                # what the vision model says is on the board (see vlm.judge)
+        self.led_evidence = None
         self.narration = "No camera assessment yet."
         self.summary = ""                        # the last change, one sentence
         self.problem = None                       # wiring problem the model saw in the last change, if any
-        self.fix, self.severity, self.grid = None, None, "aligned"
+        self.fix, self.severity, self.grid = None, None, "aligned" if self._calibration_valid else "uncertain"
         self.task = {}
         self._task_version = 0
         self._force_assess = True                  # inspect an already-populated board at startup, too
@@ -539,13 +542,15 @@ class Vision:
             return self.board.warp(raw)                  # parts or a hand cover holes: the fit can slip a hole
         moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
         shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
-        if shift <= MOVED:
+        if shift <= MOVED and self._calibration_valid:
             self._realign = None
             return self.board.warp(raw)
         if self._realign is not None:                    # switch only when two fits in a row agree
             again = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self._realign.H).reshape(-1, 2)
             if float(np.linalg.norm(again - self._realign.hole_px, axis=1).mean()) / PITCH < 0.15:
                 self.board, self._realign = new, None
+                if not self._calibration_valid:
+                    self._calibration_valid, self.grid = True, "aligned"
                 self._led_ref = None                     # reference was in the old grid
                 # the baseline stays as it was flattened: if the board itself moved, the old frame needs the old grid
                 self.status = f"board moved {shift:.1f} holes: re-aligned"
@@ -605,6 +610,10 @@ class Vision:
             if period is None or (period, version) == seen:
                 continue
             board_img = self._aligned(raw)
+            if not self._calibration_valid:
+                self.status = "Keep the whole board visible and still while I align the hole grid."
+                self._set_activity("calibrating")
+                continue
             if self._realign is not None:
                 continue                          # get the second fit even if nothing moves again
             if self.baseline is None:
@@ -782,6 +791,14 @@ class Vision:
                            camera=vlm.camera_view(raw, board), focus=vlm.camera_focus(raw, board, vlm.step_rows(step)))
             if not isinstance(r, dict) or not isinstance(r.get("detail"), str):
                 raise ValueError("invalid verification reply")
+            if re.search(r"\bled\b", step + " " + r["detail"], re.I):
+                evidence = self._read_led(board, warped, raw, vlm.step_rows(step))
+                if r.get("status") in ("pass", "fail") and not vlm.led_agrees(r, evidence):
+                    r = {"status": "unsure", "detail": vlm.LED_UNCLEAR}
+                elif vlm.led_agrees(r, evidence):
+                    error = vlm.led_position_error(step, evidence["holes"])
+                    if error:
+                        r = {"status": "fail", "detail": error}
         except Exception as e:
             print(f"  [vlm] verify failed: {e!r}", flush=True)
             return CheckResult("unsure", "I couldn't check that just now. Say done to try again.")
@@ -791,12 +808,22 @@ class Vision:
         status = r.get("status") if r.get("status") in ("pass", "fail", "unsure") else "unsure"
         result = CheckResult(status, r.get("detail") or "", [])
         result.frame = self._save(warped, status)
+        self._save(raw, status + "_camera")  # retain the real entry-point pixels, not just the warp
         print(f"[{time.strftime('%H:%M:%S')}] verify {step[:50]!r}: {status} - {result.detail}", flush=True)
         self.status = result.detail
         self.summary, self.narration = result.detail, ""  # this check supersedes old empty-board narration
         self._record_observation(result.detail, period, "verify")
         self._publish()
         return result
+
+    def _read_led(self, board, warped, raw, rows):
+        import vlm
+        try:
+            evidence = vlm.read_led(board, warped, rows, camera=vlm.camera_view(raw, board))
+        except Exception as exc:
+            evidence = {"certain": False, "holes": [], "error": type(exc).__name__}
+        self.led_evidence = evidence
+        return evidence
 
     def _use_model(self) -> bool:
         import vlm
@@ -827,6 +854,25 @@ class Vision:
                               cam_after=vlm.camera_view(raw, self.board),
                               focus=vlm.camera_focus(raw, board, focus_rows))
                 v = vlm.validate_judgement(v, self.board.rows)
+                led_parts = [p for p in v["board"] if p["part"] == "led"]
+                led_problem = bool(re.search(r"\bled\b", (v["problem"] or "") + " " + (v["fix"] or ""), re.I))
+                if v["grid"] == "aligned" and (led_parts or led_problem):
+                    observed_rows = [int(h[1:]) for p in led_parts for h in p["holes"] if re.fullmatch(r"[a-j]\d+", h)]
+                    evidence = self._read_led(board, board_img, raw, focus_rows + observed_rows)
+                    if not vlm.led_agrees(v, evidence):
+                        # Never publish guessed LED coordinates to the tutor OR the circuit simulator.
+                        for part in led_parts:
+                            part["holes"] = []
+                        for change in v["changes"]:
+                            if change["part"] == "led" and change["action"] != "removed":
+                                change["holes"] = []
+                        v["summary"], v["narration"] = "", vlm.LED_UNCLEAR
+                        if led_problem or not v["problem"]:
+                            v["problem"], v["fix"], v["severity"] = vlm.LED_UNCLEAR, None, "warning"
+                    elif not v["problem"]:
+                        error = vlm.led_position_error(step.get("check", {}).get("ask", ""), evidence["holes"])
+                        if error:
+                            v["problem"], v["fix"], v["severity"] = error, "Reseat the LED in the requested rows.", "wrong"
                 accepted_period = self._matching_period(period, version, board_img, board)
                 if accepted_period is None:
                     self.discarded_observations += 1
@@ -901,6 +947,7 @@ class Vision:
                 "fix": self.fix, "severity": self.severity, "grid": self.grid,
                 "observation": self.observation(), "last_model_error": self.last_model_error,
                 "discarded_observations": self.discarded_observations,
+                "led_evidence": self.led_evidence,
                 "activity": {k: v for k, v in self.activity.items() if k != "t"}}
 
     def _publish(self) -> None:
