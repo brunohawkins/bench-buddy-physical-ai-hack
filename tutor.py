@@ -6,6 +6,7 @@ Brain.tutor() decides what to say and suggests an action, which the controller o
 never passes a camera- or meter-checked step on the LLM's word). Logs the same log.jsonl lines as fsm.py.
 """
 import json
+import os
 import queue
 import re
 import threading
@@ -19,6 +20,7 @@ from debug import probe
 from physics import predict, within
 
 LOG_PATH = Path("log.jsonl")
+AUTO_CHECK = os.environ.get("TUTOR_AUTO_CHECK", "1") != "0"   # check look-steps whenever the camera sees a change
 IDLE_AFTER = 45                          # seconds of quiet during a step before checking in (once per step)
 PROBLEM_COOLDOWN = 20                    # repeat a persistent error at most once in this many seconds
 CAMERA_NOTE_TTL = 15                     # old notes must never be narrated as a live view
@@ -213,6 +215,9 @@ class Tutor:
             step = self.current()
             if self.state == "STEP" and step and step["check"]["kind"] == "vision" and ev["kind"] == "placed":
                 return self.check()
+            if self.state == "STEP" and step and step["check"]["kind"] == "look" and AUTO_CHECK \
+                    and ev["kind"] in ("placed", "removed", "moved", "changed"):
+                return self.check(auto=True)        # the camera saw a change: check the step without waiting for "done"
             if self.state in ("STEP", "DONE"):
                 self.respond(ev)
             return
@@ -415,8 +420,9 @@ class Tutor:
 
     # --- checks -------------------------------------------------------------------
 
-    def check(self) -> None:
-        """Run the current step's check; pass -> next step, otherwise explain and stay."""
+    def check(self, auto: bool = False) -> None:
+        """Run the current step's check; pass -> next step, otherwise explain and stay.
+        auto: triggered by the camera, not the user; a not-yet-done step stays quiet (partial progress)."""
         if self._problem:
             return self._speak_problem(self._problem)
         version = self._problem_version
@@ -455,6 +461,8 @@ class Tutor:
                 return
             return self.open_step(self.step_i + 1)
         self.goto("STEP")
+        if auto:
+            return                                  # mid-step; real mistakes are spoken by the problem path
         if status == "unsure":
             return self.say(detail or "I can't see it clearly. Move your hand away, then ask me to check again.")
         if chk["kind"] in ("vision", "look"):
