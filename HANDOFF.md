@@ -63,7 +63,7 @@ brain.py       (Zoe) LLM layer: keyword fast path + structured output; start/tut
 voice.py       (Zoe) ElevenLabs Flash streaming TTS with a disk cache; OpenAI gpt-4o-mini-transcribe STT, hands-free VAD.
 ui_server.py   (Parthiv) stdlib HTTP: serves ui/, SSE /events (fsm/tutor log lines + {"type":"board"} vision
                state), POST /api/input, /camera.mjpg (vision.view()), GET /api/board (vision.state()).
-ui/            (Parthiv) landing page, chat card with push-to-talk, isometric board (js/board.mjs, PARTS format).
+ui/            (Parthiv) landing page, chat with hands-free voice / optional push-to-talk, isometric board.
 ```
 
 ### Vision board state (for the 3D/isometric view)
@@ -182,6 +182,22 @@ overview. Prompts separate LED presence from glow and from the ability to read i
 verification prompt against the captured live preview: it identified the red LED body and returned unsure
 because its leg holes were obscured. It did not claim the LED was missing. Camera angle can still hide the
 entry points; the close-up cannot recover physically occluded legs. Restart the running app to load these changes.
+
+### Follow-up: hands-free browser voice
+
+The browser wrapper previously bypassed `Voice.listen()` and waited only for typed text or PTT messages, even
+though the real voice was configured for hands-free mode. `UIVoice` now runs one cancellable speech worker
+beside the input queue. It detects speech automatically whenever the tutor is accepting a turn. Typed input
+or mic pause cancels that turn immediately; late STT results cannot leak into the next turn. Each turn has a
+fresh, bounded audio queue, and speech is ignored during TTS and its echo tail. An unfinished sentence is also
+discarded across a muted gap.
+
+`/api/hello` advertises `hands_free`; SSE status includes `mic_state`, `mic_paused` and `mic_error`. The mic
+button pauses/resumes, Space is no longer required, and microphone startup failures leave typing available
+with a retry hint. Pause is handled immediately even while the tutor is busy; reconnects restore mic status.
+`--ptt` and fake/demo voice retain the manual path. Restart the Python app and refresh the browser to activate.
+Regression coverage uses generated audio, stubbed transcription/device callbacks and threaded UI input;
+an actual microphone conversation still needs a live rehearsal.
 
 ## Also before the deadline
 

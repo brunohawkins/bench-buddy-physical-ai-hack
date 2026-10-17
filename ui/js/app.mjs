@@ -21,6 +21,7 @@ hero.set({ led: true, hz: 0.99 });
 const ui = {
   started: false, transport: null, mode: "demo", project: DEMO_PROJECT, stepI: 0,
   fsm: "IDLE", muted: false, browserTts: true, serverStt: false, camera: false,
+  handsFree: false, micPaused: false, micState: "idle", micError: "", speaking: false,
   lastLocal: "", waiting: false, thinking: false,
 };
 const prebuilt = () => ALL.filter((id) => !ui.project.steps.some((s) => s.id === id));
@@ -73,6 +74,7 @@ async function connect() {
     ui.transport = {
       send: (text) => post({ text }),
       ptt: (action) => post({ ptt: action }),
+      mic: (action) => post({ mic: action }),
     };
   } else {
     ui.mode = "demo";
@@ -94,9 +96,11 @@ function applyHello(h) {
   if (h.project) ui.project = { ...DEMO_PROJECT, ...h.project };
   ui.browserTts = !!h.browser_tts;
   ui.serverStt = !!h.server_stt;
+  ui.handsFree = !!h.hands_free;
   ui.camera = !!h.camera;
   if (board) { board.reveal(prebuilt()); renderPartsList(); }
   $("readout").textContent = `predicted ${ui.project.predicted.toFixed(2)} Hz · measured —`;
+  updateMic();
 }
 
 // ---------------------------------------------------------------- events
@@ -119,12 +123,40 @@ function resetSession() {
 }
 
 function status(ev) {
-  if ("waiting" in ev) {
-    ui.waiting = ev.waiting;
-    $("mic").classList.toggle("your-turn", ev.waiting);
-    if (ev.waiting) setStatus("Your turn · hold Space to talk");
+  for (const [field, key] of Object.entries({ waiting: "waiting", speaking: "speaking", hands_free: "handsFree",
+    mic_paused: "micPaused", mic_state: "micState", mic_error: "micError" })) {
+    if (field in ev) ui[key] = ev[field];
   }
   if ("speaking" in ev) avatar(ev.speaking ? "speaking" : "");
+  updateMic();
+}
+
+function updateMic() {
+  const active = ui.waiting && !ui.micPaused && !ui.speaking;
+  $("mic").classList.toggle("your-turn", ui.handsFree ? active && ["listening", "hearing"].includes(ui.micState) : ui.waiting);
+  $("mic").classList.toggle("paused", ui.handsFree && ui.micPaused);
+  if (!ui.handsFree) {
+    $("mic").setAttribute("aria-label", "Hold to talk");
+    $("mic").removeAttribute("aria-pressed");
+    $("hint").innerHTML = "Hold <kbd>Space</kbd> or the mic to talk · <kbd>Enter</kbd> sends";
+    if (ui.waiting && !ui.speaking) setStatus("Your turn · hold Space to talk");
+    return;
+  }
+  const label = ui.micPaused ? "Resume microphone" : "Pause microphone";
+  $("mic").setAttribute("aria-label", label);
+  $("mic").setAttribute("aria-pressed", !ui.micPaused);
+  $("mic").title = label;
+  $("mic").classList.toggle("on", active && ui.micState === "hearing");
+  $("hint").textContent = ui.micError || (ui.micPaused
+    ? "Mic paused · tap the mic to resume · Enter sends"
+    : "Speak naturally · tap the mic to pause · Enter sends");
+  if (ui.speaking) return setStatus("Speaking…");
+  if (ui.waiting) {
+    const labels = { starting: "Preparing microphone…", calibrating: "Preparing microphone…",
+      listening: "Listening · speak naturally", hearing: "Listening…", transcribing: "Transcribing…", idle: "Your turn…" };
+    setStatus(ui.micError ? "Microphone unavailable · you can type" : ui.micPaused ? "Mic paused · you can type" : labels[ui.micState] || "Your turn…");
+    if (active && ui.micState === "hearing") avatar("listening");
+  }
 }
 
 function onLog(l, replay) {
@@ -134,6 +166,7 @@ function onLog(l, replay) {
   if (l.heard !== undefined) {
     if (l.heard === ui.lastLocal) ui.lastLocal = "";
     else addMsg("you", l.heard, "voice");
+    if (!replay) thinking(true);
   }
   if (l.parts) partsCard(l.parts, l.missing || []);
   if (l.check === "vision") visionResult(l);
@@ -366,6 +399,7 @@ const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, talking = false, pressedAt = 0, interim = null, finalText = "";
 
 function pttDown() {
+  if (ui.handsFree) return;
   if (talking) return pttUp(true);
   talking = true; pressedAt = performance.now();
   stopSpeaking();
@@ -400,12 +434,13 @@ function pttUp(force) {
   if (ui.serverStt) { thinking(true); return ui.transport.ptt("stop"); }
   rec?.stop();
 }
-$("mic").addEventListener("pointerdown", (e) => { e.preventDefault(); pttDown(); });
-$("mic").addEventListener("pointerup", () => pttUp());
-$("mic").addEventListener("pointercancel", () => pttUp(true));
+$("mic").addEventListener("click", () => { if (ui.handsFree) ui.transport?.mic(ui.micPaused ? "resume" : "pause"); });
+$("mic").addEventListener("pointerdown", (e) => { if (!ui.handsFree) { e.preventDefault(); pttDown(); } });
+$("mic").addEventListener("pointerup", () => { if (!ui.handsFree) pttUp(); });
+$("mic").addEventListener("pointercancel", () => { if (!ui.handsFree) pttUp(true); });
 const typing = (e) => /TEXTAREA|INPUT|SELECT/.test(e.target.tagName);
-addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttDown(); } });
-addEventListener("keyup", (e) => { if (e.code === "Space" && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttUp(); } });
+addEventListener("keydown", (e) => { if (!ui.handsFree && e.code === "Space" && !e.repeat && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttDown(); } });
+addEventListener("keyup", (e) => { if (!ui.handsFree && e.code === "Space" && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttUp(); } });
 
 // ---------------------------------------------------------------- voice out (demo, or when the server asks the browser to speak)
 let voice = null;

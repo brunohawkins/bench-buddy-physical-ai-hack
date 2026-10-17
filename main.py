@@ -67,7 +67,7 @@ def main():
     p.add_argument("--fake", nargs="*", choices=MODULES, metavar="MODULE",
                    help=f"use fakes for these modules ({', '.join(MODULES)}); all of them if none listed")
     p.add_argument("--script", action="store_true", help="run the fixed 555 script (fsm.py) instead of tutor mode")
-    p.add_argument("--ptt", action="store_true", help="push-to-talk with Enter instead of hands-free listening")
+    p.add_argument("--ptt", action="store_true", help="push-to-talk with Enter (Space/mic in the UI) instead of hands-free listening")
     p.add_argument("--fault", choices=("reset", "none"), default="reset",
                    help="fault the fake bench develops after the first measurement")
     p.add_argument("--speak", action="store_true", help="fake voice reads replies aloud with macOS say")

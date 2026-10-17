@@ -26,6 +26,7 @@ class UI:
         self.port = port
         self.vision = vision
         self.inbox: queue.Queue[dict] = queue.Queue()
+        self.mic_control = None
         self.session = uuid.uuid4().hex[:8]       # lets a page notice the server restarted
         self._history: list[tuple[int, dict]] = []
         self._clients: list[queue.Queue] = []
@@ -38,6 +39,7 @@ class UI:
             "project": {"name": "555 blinker", "steps": project.STEPS, "predicted": f, "duty": duty},
             "browser_tts": silent,
             "server_stt": hasattr(voice, "record_start") and hasattr(voice, "record_stop"),
+            "hands_free": bool(getattr(voice, "hands_free", False)),
             "camera": hasattr(vision, "camera") and hasattr(vision, "board"),
             "session": self.session,
         }
@@ -72,10 +74,10 @@ class UI:
                 q.put((-1, {"type": "reset"}))
                 for n, ev in self._history:
                     q.put((n, {**ev, "replay": True}))
-                if self._status:
-                    q.put((len(self._history) - 1, {"type": "status", **self._status}))
                 if self._board:
                     q.put((len(self._history) - 1, self._board))
+            if self._status:
+                q.put((len(self._history) - 1, {"type": "status", **self._status}))
             self._clients.append(q)
         return q
 
@@ -83,6 +85,19 @@ class UI:
         with self._lock:
             if q in self._clients:
                 self._clients.remove(q)
+
+    def submit(self, message) -> bool:
+        """Mic pause takes effect even while the tutor is thinking or speaking."""
+        if not isinstance(message, dict) or not isinstance(message.get("text", ""), str):
+            return False
+        if "mic" in message:
+            if message["mic"] not in ("pause", "resume"):
+                return False
+            if self.mic_control:
+                self.mic_control(message["mic"] == "resume")
+        else:
+            self.inbox.put({k: v for k, v in message.items() if k in ("text", "ptt")})
+        return True
 
     def attach(self, buddy) -> None:
         """Mirror every BenchBuddy.log() line to the page."""
@@ -132,7 +147,8 @@ class UI:
                     return self.send_error(404)
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
                 try:
-                    ui.inbox.put(json.loads(body or b"{}"))
+                    if not ui.submit(json.loads(body or b"{}")):
+                        return self.send_error(400)
                 except json.JSONDecodeError:
                     return self.send_error(400)
                 self.send_response(204)
@@ -202,18 +218,90 @@ class UI:
 
 
 class UIVoice:
-    """Wraps the real or fake voice: input comes from the page, replies go to the page and to the inner voice."""
+    """Race automatic speech with page input; a single worker owns the microphone detector."""
 
     def __init__(self, inner, ui: UI):
         self.inner, self.ui = inner, ui
+        self.hands_free = bool(getattr(inner, "hands_free", False))
+        self._lock = threading.RLock()
+        self._waiting, self._paused = False, False
+        self._cancel = None
+        self._requests: queue.Queue = queue.Queue()
+        self.ui.mic_control = self.set_mic_enabled
+        if self.hands_free:
+            threading.Thread(target=self._speech_worker, daemon=True, name="ui-speech").start()
+
+    def _begin_listening(self) -> None:
+        """Called under _lock. Supersede any in-flight transcription without blocking typed input."""
+        if self._cancel:
+            self._cancel.set()
+        if self.hands_free and self._waiting and not self._paused:
+            self._cancel = threading.Event()
+            self._requests.put(self._cancel)
+            self.ui.emit({"type": "status", "mic_state": "starting", "mic_error": ""})
+
+    def set_mic_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            if not self.hands_free:
+                return
+            self._paused = not enabled
+            self.ui.emit({"type": "status", "mic_paused": self._paused,
+                          "mic_state": "idle" if enabled else "paused", "mic_error": ""})
+            self._begin_listening()
+
+    def _speech_worker(self) -> None:
+        while True:
+            cancel = self._requests.get()
+            if cancel is None:
+                return
+            if cancel.is_set():
+                continue
+
+            def status(state):
+                with self._lock:
+                    if self._cancel is cancel and not cancel.is_set():
+                        self.ui.emit({"type": "status", "mic_state": state})
+
+            try:
+                text = self.inner.listen_hands_free(cancel=cancel, on_state=status)
+            except Exception as exc:
+                print(f"[voice] microphone unavailable ({exc!r})")
+                with self._lock:
+                    if self._cancel is cancel and not cancel.is_set():
+                        self._paused = True
+                        cancel.set()
+                        self.ui.emit({"type": "status", "mic_paused": True, "mic_state": "error",
+                                      "mic_error": "Microphone unavailable. Check microphone permission or device, "
+                                                   "then tap the mic to retry. You can still type."})
+                continue
+            with self._lock:
+                if text and self._cancel is cancel and not cancel.is_set():
+                    self.ui.inbox.put({"text": text, "_voice_cancel": cancel})
+
+    def close(self) -> None:
+        with self._lock:
+            if self._cancel:
+                self._cancel.set()
+            self._requests.put(None)
 
     def listen(self) -> str:
-        self.ui.emit({"type": "status", "waiting": True})
+        with self._lock:
+            self._waiting = True
+            self.ui.emit({"type": "status", "waiting": True, "hands_free": self.hands_free,
+                          "mic_paused": self._paused})
+            self._begin_listening()
         try:
             while True:
                 msg = self.ui.inbox.get()
+                if "_voice_cancel" in msg:
+                    with self._lock:
+                        cancel = msg["_voice_cancel"]
+                        if cancel is not self._cancel or cancel.is_set():
+                            continue
                 if msg.get("text", "").strip():
                     return msg["text"].strip()
+                if self.hands_free:                 # Space cannot start a second recording in automatic mode
+                    continue
                 if msg.get("ptt") == "start" and hasattr(self.inner, "record_start"):
                     self.inner.record_start()
                 elif msg.get("ptt") == "stop" and hasattr(self.inner, "record_stop"):
@@ -221,7 +309,12 @@ class UIVoice:
                     if text:
                         return text
         finally:
-            self.ui.emit({"type": "status", "waiting": False})
+            with self._lock:
+                self._waiting = False
+                if self._cancel:
+                    self._cancel.set()
+                self.ui.emit({"type": "status", "waiting": False,
+                              "mic_state": "paused" if self._paused else "idle"})
 
     def say(self, text: str) -> None:
         self.ui.emit({"type": "status", "speaking": True})

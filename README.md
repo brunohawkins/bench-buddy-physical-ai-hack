@@ -31,6 +31,13 @@ For the radar demo with the phone camera and spoken guidance:
 .venv/bin/python main.py --fake bench --ui
 ```
 
+The live UI listens automatically through the computer's microphone when it is your turn. Speak normally,
+then pause for about a second to send the utterance; no Space press is needed. The mic button pauses/resumes
+listening, and typing still works. Listening pauses while Bench Buddy speaks and resumes after its echo fades.
+Microphone errors appear beside the input with a retry option. Add `--ptt` to use manual Space/mic recording.
+The offline demo and fake voice still use browser push-to-talk. Restart the Python app after updating it and
+refresh the page to load the new voice controls.
+
 Vision checks each settled change against the current instruction and the whole circuit. A clearly observed
 mistake produces an immediate spoken correction with the observed hole and the intended move, without saying
 “done” or waiting for the tutor model. It finishes any speech already playing, suppresses repeated corrections
@@ -65,7 +72,7 @@ needed to assess recognition accuracy on your lighting, board position and compo
 | `main.py` | L | Entry point; `--fake [modules]` picks fakes |
 | `fsm.py` | L | State machine, the only thing that decides pass/fail and what's next; writes `log.jsonl` |
 | `project.py` | L + H | The 555 project as data: required parts, steps, R/C values |
-| `voice.py` | L | Push-to-talk STT (OpenAI) and TTS (ElevenLabs) with a phrase cache |
+| `voice.py` | L | Hands-free / optional push-to-talk STT (OpenAI), streaming TTS (ElevenLabs) with a phrase cache |
 | `brain.py` | L | LLM: parts parsing, intent, phrasing replies |
 | `camera.py` | V | Threaded frame grabber; `python camera.py 1` to preview a camera index |
 | `calibrate.py` | V | `python calibrate.py`: finds the board and every hole automatically → (row, col) ↔ pixel |

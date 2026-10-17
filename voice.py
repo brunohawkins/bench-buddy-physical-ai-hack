@@ -11,6 +11,7 @@ import io
 import os
 import queue
 import subprocess
+import threading
 import time
 import wave
 from collections import deque
@@ -42,7 +43,7 @@ class TurnDetector:
     """Feed 30 ms int16 frames; returns a whole utterance (bytes) when one ends, else None."""
 
     def __init__(self, min_rms: float = 300, start_frames: int = 3, end_silence: float = 1.0, preroll: float = 0.3,
-                 min_speech: float = 0.4, max_len: float = 20, calibrate: float = 0.5):
+                 min_speech: float = 0.25, max_len: float = 20, calibrate: float = 0.5):
         per_s = 1000 / 30
         self.min_rms, self.start_frames = min_rms, start_frames
         self.end_frames, self.min_speech = round(end_silence * per_s), round(min_speech * per_s)
@@ -122,7 +123,7 @@ class Voice:
         self.last_stt_ms = None          # time from releasing push-to-talk to transcript; fsm logs it
         self._recording, self._frames, self._mic_stream = False, [], None
         self.hands_free = hands_free and self.stt is not None
-        self._audio: queue.Queue = queue.Queue()     # hands-free mic frames; None marks a muted gap
+        self._capture = None                        # (audio queue, cancellation event) for the current turn
         self._speaking, self._mute_until, self._gap_sent = False, 0.0, False
         self._detector = TurnDetector(min_rms=float(os.environ.get("VAD_MIN_RMS", 300)),
                                       end_silence=float(os.environ.get("VAD_END_SILENCE", 1.0)))
@@ -137,7 +138,7 @@ class Voice:
         """Hands-free: block until the next utterance and return its transcript. Push-to-talk: Enter to start,
         Enter to stop; typing text instead of pressing Enter uses it as the transcript."""
         if self.hands_free:
-            return self._listen_hands_free()
+            return self.listen_hands_free()
         self.last_stt_ms = None
         typed = input("[Enter] to talk, or type> ").strip()
         if typed or self.stt is None:
@@ -161,21 +162,56 @@ class Voice:
         self._recording = False
         return self._transcribe(b"".join(self._frames))
 
-    def _listen_hands_free(self) -> str:
-        self._mic()
+    def listen_hands_free(self, cancel=None, on_state=None) -> str:
+        """One automatic turn. Cancellation lets typed input or a UI mic pause win immediately.
+
+        Only one caller may run this at a time. Each turn owns a fresh queue so audio captured while
+        processing a previous turn cannot become the next command.
+        """
+        cancel = cancel if cancel is not None else threading.Event()
+        if cancel.is_set():
+            return ""
+        audio = queue.Queue(maxsize=1000)             # at most 30 seconds, even during a slow STT call
+        self._capture = (audio, cancel)
+        self._detector.reset()
+        try:
+            self._mic()
+            return self._detect_turn(audio, cancel, on_state)
+        finally:
+            self._capture = None
+            self._detector.reset()
+
+    def _detect_turn(self, audio, cancel, on_state) -> str:
+        state = None
+
+        def report(value):
+            nonlocal state
+            if value != state and not cancel.is_set():
+                state = value
+                if on_state:
+                    on_state(value)
+
         if self._detector.floor is None:
             print("[voice] listening for room noise...")
+        report("calibrating" if self._detector.floor is None else "listening")
         announced, pending, waited = False, "", 0
         wait_frames = round(CONTINUE_FOR * 1000 / 30)
-        while True:
-            frame = self._audio.get()
+        while not cancel.is_set():
+            try:
+                frame = audio.get(timeout=0.1)
+            except queue.Empty:
+                continue
             if frame is None:                        # we were speaking: forget anything half-heard
                 self._detector.reset()
+                pending, waited = "", 0
+                report("idle")
                 continue
             if not announced and self._detector.floor is not None:
                 print("  (listening)")
                 announced = True
             utterance = self._detector.feed(frame)
+            report("hearing" if self._detector.in_speech else
+                   "calibrating" if self._detector.floor is None else "listening")
             if utterance is None:
                 if pending and not self._detector.in_speech:
                     waited += 1
@@ -183,7 +219,11 @@ class Voice:
                         print(f"  heard: {pending}")
                         return pending
                 continue
+            report("transcribing")
             text = self._transcribe(utterance)
+            if cancel.is_set():
+                return ""                           # never submit a transcript from a cancelled turn
+            report("listening")
             if not text:
                 continue
             pending = f"{pending} {text}".strip() if pending else text
@@ -193,6 +233,7 @@ class Voice:
                 continue
             print(f"  heard: {pending}")
             return pending
+        return ""
 
     def _transcribe(self, audio: bytes) -> str:
         self.last_stt_ms = None
@@ -259,19 +300,41 @@ class Voice:
         def on_audio(data, frames, t, status):
             if self._recording:
                 self._frames.append(bytes(data))
-            if not self.hands_free:
+            capture = self._capture
+            if not self.hands_free or capture is None:
+                return
+            audio, cancel = capture
+            if cancel.is_set():
                 return
             if self._speaking or time.time() < self._mute_until:
                 if not self._gap_sent:
-                    self._audio.put(None)
+                    self._enqueue_audio(audio, None)
                     self._gap_sent = True
                 return
             self._gap_sent = False
-            self._audio.put(bytes(data))
+            self._enqueue_audio(audio, bytes(data))
 
-        self._mic_stream = sd.RawInputStream(samplerate=MIC_RATE, channels=1, dtype="int16", blocksize=FRAME,
-                                             callback=on_audio)
-        self._mic_stream.start()
+        stream = sd.RawInputStream(samplerate=MIC_RATE, channels=1, dtype="int16", blocksize=FRAME,
+                                   callback=on_audio)
+        try:
+            stream.start()
+        except Exception:
+            stream.close()
+            raise
+        self._mic_stream = stream
+
+    @staticmethod
+    def _enqueue_audio(audio, frame) -> None:
+        try:
+            audio.put_nowait(frame)
+        except queue.Full:
+            # Never block the device callback or transcribe a truncated, stale sentence.
+            while True:
+                try:
+                    audio.get_nowait()
+                except queue.Empty:
+                    break
+            audio.put_nowait(None)
 
     def _synth(self, text: str):
         """Iterator of raw 16-bit mono PCM chunks."""

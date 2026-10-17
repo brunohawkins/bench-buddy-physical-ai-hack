@@ -1,6 +1,11 @@
 # Bench Buddy UI
 
-Landing page → "Start building" → the bench: a floating chat card on the left (push-to-talk mic + text box) and the board on a green cutting mat.
+Landing page → "Start building" → the bench: a floating chat card on the left (mic + text box) and the board on a green cutting mat.
+
+The live backend listens hands-free through the computer's microphone by default. Speak when the status says
+“Listening”; a pause of about a second sends the turn. Click the mic to pause/resume capture. Typed input can
+be sent at any time. The mic ignores the tutor's speech and a short echo tail. Microphone failures show a
+retry hint and leave typing available. `--ptt` retains manual Space/mic recording.
 
 ```bash
 python3 -m http.server 8000 -d ui      # then open http://localhost:8000
@@ -9,15 +14,17 @@ python3 -m http.server 8000 -d ui      # then open http://localhost:8000
 With no backend it runs a **built-in demo** (`js/demo.mjs`, a port of `fsm.py` + the fakes). Add `?demo` to force it.
 Voice in uses the browser's speech recognition (Chrome/Safari); voice out uses the browser's speech synthesis in demo mode.
 
-## Hooking it to `main.py` (not built yet)
+## Running with `main.py`
+
+`.venv/bin/python main.py --fake bench --ui` runs the real camera, voice and tutor with a fake meter.
 
 The UI is driven entirely by `fsm.py` log lines, the same dicts written to `log.jsonl`. A backend only needs:
 
 | Route | Direction | Body |
 | --- | --- | --- |
-| `GET /api/hello` | → UI | `{"project": {"steps": project.STEPS, "predicted": 0.99}, "browser_tts": false, "server_stt": false, "camera": true}` |
-| `GET /events` (SSE) | → UI | `{"type": "log", "line": <log line>}`, `{"type": "status", "waiting": true}` / `{"speaking": true}` |
-| `POST /api/input` | UI → | `{"text": "done"}` (typed or browser-transcribed) or `{"ptt": "start" \| "stop"}` when `server_stt` |
+| `GET /api/hello` | → UI | `{"project": {"steps": project.STEPS, "predicted": 0.99}, "browser_tts": false, "server_stt": true, "hands_free": true, "camera": true}` |
+| `GET /events` (SSE) | → UI | `{"type": "log", "line": <log line>}`, `{"type": "status", "waiting": true, "hands_free": true, "mic_state": "listening", "mic_paused": false}`; also `speaking` and `mic_error` |
+| `POST /api/input` | UI → | `{"text": "done"}`, `{"mic": "pause" \| "resume"}` in hands-free mode, or `{"ptt": "start" \| "stop"}` in manual mode |
 | `GET /camera.mjpg` | → UI | optional MJPEG of the phone camera with the hole grid |
 | `GET /frames/...` | → UI | annotated jpgs from `CheckResult.frame`, shown in the check card |
 | `GET /api/board` | → UI | live board state from vision (below) |
