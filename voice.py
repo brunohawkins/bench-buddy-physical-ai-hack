@@ -61,14 +61,28 @@ class Voice:
         typed = input("[Enter] to talk, or type> ").strip()
         if typed or self.stt is None:
             return typed
-        self._recording, self._frames = True, []
-        self._mic()                      # no-op after the first call; the stream stays open
+        self.record_start()
         input("  recording... [Enter] to stop")
+        text = self.record_stop()
+        if not text:
+            return input("  didn't catch that, type it> ")
+        print(f"  heard: {text}")
+        return text
+
+    def record_start(self) -> None:
+        """Start push-to-talk. Also used by the browser UI's mic button (ui_server.UIVoice)."""
+        self._frames = []
+        self._mic()                      # no-op after the first call; the stream stays open
+        self._recording = True
+
+    def record_stop(self) -> str:
+        """Stop push-to-talk -> transcript, or "" if the clip was too short or transcription failed."""
         self._recording = False
-        t0 = time.perf_counter()
+        self.last_stt_ms = None
         audio = b"".join(self._frames)
-        if len(audio) < MIN_CLIP_BYTES:
-            return input("  too short, type it> ")
+        if self.stt is None or len(audio) < MIN_CLIP_BYTES:
+            return ""
+        t0 = time.perf_counter()
         try:
             text = self.stt.audio.transcriptions.create(
                 model=self.stt_model, file=("clip.wav", _wav(audio)), language="en",
@@ -77,9 +91,6 @@ class Voice:
             print(f"[voice] transcription failed ({e!r})")
             text = ""
         self.last_stt_ms = round((time.perf_counter() - t0) * 1000)
-        if not text:
-            return input("  didn't catch that, type it> ")
-        print(f"  heard: {text}")
         return text
 
     def say(self, text: str) -> None:
