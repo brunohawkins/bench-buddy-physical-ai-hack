@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raspberry Pi 5</title>
+<style>
+:root{--page:#0b0b0b;--card:#131313;--text:#a3a3a3;--strong:#e6e6e6;--muted:#6e6e6e;--rule:#262626;--chip:#1c1c1c;--accent:#ffffff}
+:root[data-theme="light"]{--page:#f2f2ef;--card:#fbfbfa;--text:#57575a;--strong:#18181a;--muted:#8c8c90;--rule:#e2e2de;--chip:#efefec;--accent:#000000}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+:root[data-theme="light"]{color-scheme:light}
+body{margin:0;background:var(--page);color:var(--text);font:14px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{width:min(980px,100% - 32px);margin:40px auto 64px}
+.plate{position:relative;background:var(--card);border-radius:14px;box-shadow:inset 0 1px 0 0 #ffffff0a,0 0 0 1px #00000026,0 12px 24px -12px #00000040;overflow:hidden}
+.stage{display:block;width:100%;aspect-ratio:16/10;touch-action:none;cursor:grab}
+.stage:active{cursor:grabbing}
+.corner{position:absolute;font:12px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);pointer-events:none}
+.corner[data-c="fig"]{top:20px;left:22px;color:var(--strong)}
+.corner[data-c="title"]{top:20px;right:22px}
+.corner[data-c="hint"]{bottom:20px;left:22px}
+.corner[data-c="readout"]{bottom:20px;right:22px;color:var(--strong);text-transform:none;letter-spacing:0;max-width:60%;text-align:right;line-height:1.4}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.bar button{font:12px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;color:var(--strong);background:var(--chip);border:1px solid var(--rule);border-radius:8px;padding:9px 12px;cursor:pointer}
+.bar button[aria-pressed="true"]{border-color:var(--strong)}
+.bar button:focus-visible{outline:2px solid var(--strong);outline-offset:2px}
+.legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 16px;margin:18px 0 0;padding:0;list-style:none;font-size:13px}
+.legend li{cursor:pointer;padding:2px 0;color:var(--text)}
+.legend li[data-on]{color:var(--strong)}
+.legend b{font:11px ui-monospace,Menlo,Consolas,monospace;color:var(--muted);margin-right:8px}
+.caption{margin:16px 0 0;font-size:13px;max-width:72ch}
+@media (max-width:600px){.corner[data-c="title"]{display:none}.corner[data-c="readout"]{max-width:90%}.corner[data-c="hint"]{display:none}}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<main>
+  <figure style="margin:0">
+    <div class="plate">
+      <canvas class="stage" tabindex="0" aria-label="Raspberry Pi 5, 4 GB. Drag to rotate, right-drag to pan, scroll to zoom. E takes it apart, arrow keys step through the parts, G moves the selected part."></canvas>
+      <span class="corner" data-c="fig">Fig 2</span>
+      <span class="corner" data-c="title">Raspberry Pi 5 · 4 GB</span>
+      <span class="corner" data-c="hint">Drag to rotate · right-drag to pan · click a part</span>
+      <span class="corner" data-c="readout" data-readout>BCM2712 · 4× Cortex-A76 @ 2.4 GHz · 4 GB LPDDR4X</span>
+    </div>
+    <div class="bar">
+      <button data-act="explode" aria-pressed="false">Take apart (E)</button>
+      <button data-act="spin" aria-pressed="true">Auto-rotate</button>
+      <button data-act="move" aria-pressed="false">Move part (G)</button>
+      <button data-act="reset">Reset view</button>
+      <button data-act="top">Top</button>
+      <button data-act="bottom">Bottom</button>
+      <button data-act="theme">Light / dark</button>
+      <button data-act="glb">Download .glb</button>
+    </div>
+    <ul class="legend"></ul>
+    <figcaption class="caption">Built to the official Raspberry Pi 5 mechanical drawing: an 85 × 56 mm board, M2.5 holes on a 58 × 49 mm pattern, USB stacks at 29.1 and 47 mm and Ethernet at 10.2 mm along the long edge, USB-C at 11.2 mm and micro-HDMI at 25.8 and 39.2 mm along the short one. Heights are typical part heights, not measured.</figcaption>
+  </figure>
+</main>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { buildPi5, ASSEMBLIES } from "./model.js";
+
+const canvas = document.querySelector(".stage");
+const readout = document.querySelector("[data-readout]");
+const DEFAULT = readout.textContent;
+const still = matchMedia("(prefers-reduced-motion: reduce)");
+const html = document.documentElement;
+try { const saved = localStorage.getItem("pi5-theme"); if (saved) html.dataset.theme = saved; } catch {}
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(28, 16 / 10, 1, 2000);
+const HOME = new THREE.Vector3(105, 88, 120);
+camera.position.copy(HOME);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9a9aa2, 1.6));
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(60, 140, 80);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -90, right: 90, top: 90, bottom: -90, near: 10, far: 400 });
+key.shadow.bias = -0.0005;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.7);
+fill.position.set(-120, 60, -60);
+scene.add(fill);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.ShadowMaterial({ opacity: 0.35 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -22;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const { root, groups, parts } = buildPi5();
+scene.add(root);
+
+// Outlines on every solid (the anatomy look), and per-part materials so one part can light up.
+const lineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55 });
+const litLine = new THREE.LineBasicMaterial({ color: 0xffffff });
+for (const p of parts) {
+  p.userData.meshes = [];
+  p.traverse((o) => {
+    if (!o.isMesh || o.userData.label) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.material = o.material.clone();
+    o.userData.base = o.material.emissive.clone();
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 32), lineMat);
+    edges.userData.outline = true;
+    edges.raycast = () => {};
+    o.add(edges);
+    p.userData.meshes.push(o);
+  });
+}
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.minDistance = 60;
+controls.maxDistance = 600;
+controls.minPolarAngle = 0;
+controls.maxPolarAngle = Math.PI;
+controls.autoRotate = !still.matches;
+controls.autoRotateSpeed = 1.2;
+controls.target.set(0, 4, 0);
+
+const mover = new TransformControls(camera, canvas);
+mover.setSize(0.7);
+mover.addEventListener("dragging-changed", (e) => { controls.enabled = !e.value; });
+scene.add(mover);
+
+// Explode: one spring per assembly, staggered.
+const springs = ASSEMBLIES.map(() => ({ x: 0, v: 0, target: 0, at: 0 }));
+let apart = false;
+function setApart(next) {
+  apart = next;
+  const now = performance.now();
+  ASSEMBLIES.forEach((a, i) => { springs[i].target = apart ? 1 : 0; springs[i].at = now + 1000 * (apart ? a.delay : 0.24 - a.delay); });
+  button("explode").setAttribute("aria-pressed", String(apart));
+}
+
+// Picking and focus.
+const ray = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let hover = -1, picked = -1;
+function partAt(event) {
+  const r = canvas.getBoundingClientRect();
+  pointer.set(((event.clientX - r.left) / r.width) * 2 - 1, -((event.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const hit = ray.intersectObjects(parts, true).find((h) => h.object.isMesh);
+  if (!hit) return -1;
+  let o = hit.object;
+  while (o && o.userData.part === undefined) o = o.parent;
+  return o ? o.userData.part : -1;
+}
+function paintFocus() {
+  const on = hover >= 0 ? hover : picked;
+  parts.forEach((p, i) => {
+    const lit = i === on;
+    for (const m of p.userData.meshes) {
+      m.material.emissive.copy(lit ? new THREE.Color(html.dataset.theme === "light" ? 0x335577 : 0x2a4060) : m.userData.base);
+      for (const c of m.children) if (c.userData.outline) c.material = lit ? litLine : lineMat;
+    }
+  });
+  readout.textContent = on >= 0 ? `${parts[on].userData.name} · ${parts[on].userData.spec}` : DEFAULT;
+  document.querySelectorAll(".legend li").forEach((li) => li.toggleAttribute("data-on", +li.dataset.part === on));
+}
+let down = null;
+canvas.addEventListener("pointerdown", (e) => { down = [e.clientX, e.clientY]; hold(); });
+canvas.addEventListener("pointermove", (e) => { if (e.buttons) return; const h = partAt(e); if (h !== hover) { hover = h; paintFocus(); } });
+canvas.addEventListener("pointerleave", () => { hover = -1; paintFocus(); });
+canvas.addEventListener("pointerup", (e) => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4 || mover.dragging) return;
+  select(partAt(e));
+});
+function select(index) {
+  picked = index;
+  if (picked < 0) mover.detach();
+  else if (button("move").getAttribute("aria-pressed") === "true") mover.attach(parts[picked]);
+  paintFocus();
+}
+
+// Legend: every part, numbered, click to select.
+const legend = document.querySelector(".legend");
+legend.innerHTML = parts.map((p, i) => `<li data-part="${i}"><b>${String(i + 1).padStart(2, "0")}</b>${p.userData.name}</li>`).join("");
+legend.addEventListener("click", (e) => { const li = e.target.closest("li"); if (li) { hold(); select(+li.dataset.part); } });
+legend.addEventListener("pointerover", (e) => { const li = e.target.closest("li"); if (li) { hover = +li.dataset.part; paintFocus(); } });
+legend.addEventListener("pointerleave", () => { hover = -1; paintFocus(); });
+
+// Buttons and keys.
+const button = (act) => document.querySelector(`[data-act="${act}"]`);
+let idle = 0;
+function hold() {
+  controls.autoRotate = false;
+  button("spin").setAttribute("aria-pressed", "false");
+  clearTimeout(idle);
+}
+function view(pos) { hold(); camera.position.copy(pos); controls.target.set(0, 4, 0); controls.update(); }
+function applyTheme() {
+  const light = html.dataset.theme === "light";
+  lineMat.color.set(light ? 0x1a1a1a : 0x000000);
+  lineMat.opacity = light ? 0.45 : 0.6;
+  litLine.color.set(light ? 0x000000 : 0xffffff);
+  ground.material.opacity = light ? 0.18 : 0.45;
+  renderer.setClearColor(light ? 0xfbfbfa : 0x131313, 1);
+  paintFocus();
+}
+document.querySelector(".bar").addEventListener("click", (e) => {
+  const act = e.target.closest("button")?.dataset.act;
+  if (!act) return;
+  if (act === "explode") { hold(); setApart(!apart); }
+  if (act === "spin") { controls.autoRotate = !controls.autoRotate; e.target.setAttribute("aria-pressed", String(controls.autoRotate)); }
+  if (act === "move") {
+    const on = e.target.getAttribute("aria-pressed") !== "true";
+    e.target.setAttribute("aria-pressed", String(on));
+    if (on && picked >= 0) mover.attach(parts[picked]); else mover.detach();
+  }
+  if (act === "reset") { for (const p of parts) p.position.set(0, 0, 0); mover.detach(); select(-1); setApart(false); view(HOME); }
+  if (act === "top") view(new THREE.Vector3(0.01, 260, 0.01));
+  if (act === "bottom") view(new THREE.Vector3(0.01, -240, 0.01));
+  if (act === "theme") { html.dataset.theme = html.dataset.theme === "light" ? "dark" : "light"; try { localStorage.setItem("pi5-theme", html.dataset.theme); } catch {} applyTheme(); }
+  if (act === "glb") exportGlb();
+});
+canvas.addEventListener("keydown", (e) => {
+  if (e.key === "e" || e.key === "E") { hold(); setApart(!apart); }
+  if (e.key === "g" || e.key === "G") button("move").click();
+  if (e.key === "Escape") select(-1);
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    e.preventDefault(); hold();
+    const step = e.key === "ArrowRight" ? 1 : -1;
+    select(((picked < 0 ? (step > 0 ? -1 : 0) : picked) + step + parts.length) % parts.length);
+  }
+});
+
+function exportGlb() {
+  const copy = root.clone(true);
+  copy.traverse((o) => { if (o.userData.outline) o.removeFromParent(); });
+  new GLTFExporter().parse(copy, (glb) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([glb], { type: "model/gltf-binary" }));
+    a.download = "raspberry-pi-5-4gb.glb";
+    a.click();
+  }, (err) => console.error(err), { binary: true });
+}
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * renderer.getPixelRatio()) || canvas.height !== Math.round(h * renderer.getPixelRatio())) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 1 / 30);
+  last = now;
+  resize();
+  springs.forEach((s, i) => {
+    const want = now >= s.at ? s.target : 1 - s.target;
+    if (still.matches) { s.x = want; s.v = 0; }
+    else for (let k = 0; k < 4; k++) { s.v += ((want - s.x) * 110 - s.v * 19) * dt / 4; s.x += s.v * dt / 4; }
+    const [ox, oy, oz] = ASSEMBLIES[i].offset;
+    groups[i].position.set(ox * s.x, oy * s.x, oz * s.x);
+  });
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+applyTheme();
+requestAnimationFrame(frame);
+window.__viewer = { THREE, scene, camera, controls, parts, setApart, select, view, renderer, exportGlb };
+</script>
+</body>
+</html>

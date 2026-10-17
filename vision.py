@@ -44,6 +44,7 @@ DEBUG = bool(os.environ.get("VISION_DEBUG"))   # save every evaluated before/aft
 # Tuning. Expect to adjust these on the real board.
 MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
 MOTION_STILL = 0.003     # fraction of moving pixels below which the board counts as still
+HANDS_FRAMES = 4         # frames of motion in a row before the live view says someone is working on the board
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
 FRAME_TIMEOUT = 2.0      # a disconnected/frozen camera must not count as a stable current view
 OBSERVATION_TTL = 15.0   # do not feed old visual claims to the conversational tutor
@@ -431,6 +432,11 @@ class Vision:
         self.last_model_error = None
         self.discarded_observations = 0
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
+        # What is happening at the bench right now, for a live view: calibrating, hands (someone is working on
+        # the board), looking (settled; the model is judging these rows/holes), ready. See _set_activity.
+        self.activity: dict = {"phase": "calibrating"}
+        self._moving = 0                          # consecutive frames with motion (debounces "hands")
+        self._pixel_wires: list[list[str]] = []   # without the model: independently observed plug ends
         self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
         self._build_notes: list[str] = []         # preserve user lead identities beyond the rolling dialogue
         FRAMES_DIR.mkdir(exist_ok=True)
@@ -578,6 +584,17 @@ class Vision:
         return second.warp(fresh), fresh
 
     def _watch_loop(self):
+        while not self._stop.is_set():             # one bad frame must not stop the watcher for the rest of the run
+            try:
+                self._watch()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.status = f"vision error: {e!r}"
+                self._set_activity("error")
+                self._stop.wait(0.5)
+
+    def _watch(self):
         seen = None                               # still period already handled
         big = 0                                   # consecutive still periods with a big change
         while not self._stop.wait(0.1):
@@ -595,6 +612,7 @@ class Vision:
                 self._led_rebase(board_img, period, full=True)
                 self._save_board()
                 self.status = "watching the board"
+                self._set_activity("ready")
                 continue
             mask = change_mask(self.baseline, board_img)
             if DEBUG:
@@ -602,6 +620,7 @@ class Vision:
             if hand_in_view(board_img, mask):
                 seen = (period, version)
                 self.status = "waiting for hands to clear the board"
+                self._set_activity("hands")
                 continue                          # never learn an occluding hand as the new board
             if mask.mean() > TOO_MUCH:
                 big += 1
@@ -612,13 +631,17 @@ class Vision:
                     self._force_assess, seen = True, None
                 else:
                     self.status = "something big is over the board"
+                    self._set_activity("hands")
                 continue
             big = 0
+            if self._force_assess or meaningful_change(mask):
+                self._set_activity("looking", **self._where(mask, board_img))
             if self._use_model():
                 accepted = self._model_step(mask, board_img, raw, period)
                 if accepted is not False:
                     if accepted:
                         seen = (period, version)
+                        self._set_activity("ready")
                     continue                      # None: the board/task changed while the API was running
             self._force_assess = False
             if self.grid != "aligned":
@@ -639,6 +662,7 @@ class Vision:
                     self._emit(event)
                 self.baseline, self._baseline_raw, seen = board_img, raw, (period, version)
                 self._led_rebase(board_img, period, full=bool(rows))
+                self._set_activity("ready")
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
             period2, raw2 = self._stable_board()
@@ -661,6 +685,7 @@ class Vision:
                     self.wires.pop(e["label"], None)
                 else:
                     self.wires[e["label"]] = (e["x"], e["y"])
+            self._pixel_board(ends)
             self.overlay = event["overlay"]
             parts = ([f"placed at {', '.join(placed)}"] if placed else []) + \
                     ([f"removed from {', '.join(removed)}"] if removed else [])
@@ -670,6 +695,58 @@ class Vision:
             self._led_rebase(board2, period, full=True)
             self._save_board()
             self._emit(event)
+            self._set_activity("ready")
+
+    def _hole_of(self, end: dict) -> str | None:
+        """A wire end (plug_ends) as a hole name: "d12" stays; "top + rail" gets the row it sits by ("+top12")."""
+        from calibrate import MARGIN_ROW
+        label, x = end["label"], end["x"]
+        if not label or not label.endswith(" rail"):
+            return label
+        row = min(max(int(round((x - MARGIN_ROW) / PITCH)) + 1, 1), self.board.rows)
+        side, sign = label[:-5].split()
+        return f"{sign}{side}{row}"
+
+    def _pixel_board(self, ends: list[dict]) -> None:
+        """No vision model: show detected plug ends without inventing connections between them."""
+        if self._use_model():
+            return
+        placed = [self._hole_of(e) for e in ends if e["kind"] == "placed"]
+        removed = {self._hole_of(e) for e in ends if e["kind"] == "removed"}
+        def gone(h):                              # a rail end read back a row off still counts
+            if h in removed:
+                return True
+            ph = parse_hole(h)
+            return ph[2] is not None and any(parse_hole(r)[2] == ph[2] and abs(parse_hole(r)[0] - ph[0]) <= 2
+                                             for r in removed if r)
+        wires = [[h for h in w if not gone(h)] for w in self._pixel_wires]
+        wires = [w for w in wires if w]
+        wires.extend([h] for h in placed if h)
+        self._pixel_wires = wires
+        self.parts = [{"id": f"wire{i + 1}", "part": "wire", "colour": None, "holes": w} for i, w in enumerate(wires)]
+        self.narration = ("The board is empty." if not wires else
+                          "Wires in " + "; ".join(" and ".join(hole_label(h) for h in w) for w in wires) + ".")
+        self.summary = self.status.capitalize()
+        self._publish()
+
+    def _where(self, mask, board_img) -> dict:
+        """Quick pixel read of a settled change, before the model has judged it: rows touched and plug holes."""
+        try:
+            ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
+            holes = sorted({e["label"] for e in ends if e["kind"] == "placed" and e["row"] is not None and e["col"]})
+            rows = sorted({e["row"] for e in ends if e["row"] is not None} | set(self._component_rows(mask)))
+        except Exception as e:
+            print(f"  [activity] {e!r}", flush=True)
+            return {}
+        return {"rows": rows, "holes": holes}
+
+    def _set_activity(self, phase: str, **extra) -> None:
+        """Change the live phase and tell listeners (only on a change, so per-frame callers are cheap)."""
+        new = {"phase": phase, "t": time.time(), **extra}
+        if phase == self.activity.get("phase") and extra == {k: v for k, v in self.activity.items() if k not in ("phase", "t")}:
+            return
+        self.activity = new
+        self._publish()
 
     def note(self, who: str, text: str) -> None:
         """Conversation context for the vision model, e.g. note("User", "the black lead is ground")."""
@@ -823,7 +900,8 @@ class Vision:
                 "narration": self.narration, "status": self.status, "problem": self.problem,
                 "fix": self.fix, "severity": self.severity, "grid": self.grid,
                 "observation": self.observation(), "last_model_error": self.last_model_error,
-                "discarded_observations": self.discarded_observations}
+                "discarded_observations": self.discarded_observations,
+                "activity": {k: v for k, v in self.activity.items() if k != "t"}}
 
     def _publish(self) -> None:
         """Write the board state to frames/board_state.json and tell listeners (the UI server streams it)."""
@@ -983,6 +1061,9 @@ class Vision:
                     self._still_since = now
                 self._fps = 0.9 * self._fps + 0.1 / max(now - t_prev, 1e-3)
             self._led_step(warped, still=now - self._still_since >= STILL_FOR)
+            self._moving = self._moving + 1 if motion > MOTION_STILL else 0
+            if self._moving == HANDS_FRAMES and self.activity["phase"] in ("ready", "looking"):
+                self._set_activity("hands")
             t_prev = now
 
     def _led_step(self, warped, still: bool) -> None:

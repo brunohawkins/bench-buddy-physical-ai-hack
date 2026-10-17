@@ -33,3 +33,10 @@ frames/
 log.jsonl
 phrase_cache/
 calib.json
+
+# 3D twin build output (rebuild with: cd figures && npm run build)
+figures/parts/index.html
+figures/parts/glb/
+figures/parts/shots/
+figures/pi5/index.html
+figures/pi5/*.glb

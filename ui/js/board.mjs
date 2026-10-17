@@ -213,6 +213,10 @@ function partSvg(part, lit) {
   return "";
 }
 
+export const VIEWBOX = [W, H];
+export const partMarkup = (id) => partSvg(partById(id), false);
+export const partPoint = (id) => at(anchorOf(partById(id)));
+
 const ringAt = (spot, cls) => {
   const [x, y] = hole(spot);
   return `<g class="${cls}"><path d="${k.ring(x, y, 3.2, 0.1, P, 28)}"/><path d="${k.ring(x, y, 5.4, 0.1, P, 32)}" class="outer"/></g>`;

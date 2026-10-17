@@ -1,0 +1,15 @@
+{
+  "name": "bench-buddy-figures",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node parts/build.mjs",
+    "build:ui": "node parts/build.mjs",
+    "test": "node parts/circuit.test.mjs && node parts/twin.test.mjs && node parts/projects.test.mjs && node parts/from-vision.test.mjs",
+    "export": "node parts/export.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.21.5",
+    "three": "^0.160.0"
+  }
+}

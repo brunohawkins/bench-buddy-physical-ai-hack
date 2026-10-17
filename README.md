@@ -35,7 +35,7 @@ The live UI listens automatically through the computer's microphone when it is y
 then pause for about a second to send the utterance; no Space press is needed. The mic button pauses/resumes
 listening, and typing still works. Listening pauses while Bench Buddy speaks and resumes after its echo fades.
 Microphone errors appear beside the input with a retry option. Add `--ptt` to use manual Space/mic recording.
-The offline demo and fake voice still use browser push-to-talk. Restart the Python app after updating it and
+Fake voice still uses browser push-to-talk; the UI now needs the running Python backend. Restart the app after updating it and
 refresh the page to load the new voice controls.
 
 Vision checks each settled change against the current instruction and the whole circuit. A clearly observed

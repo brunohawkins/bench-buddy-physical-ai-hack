@@ -51,6 +51,39 @@ def test_wrong_hole_has_fix_in_event_and_ui_state(scene, monkeypatch):
     assert scene.state()["fix"] == event["fix"]
 
 
+def test_activity_updates_preserve_fault_and_observation_fields(scene, monkeypatch):
+    monkeypatch.setattr(vlm, "judge", lambda *a, **kw: judgement())
+    assert observe(scene)
+    updates = []
+    scene.listeners.append(updates.append)
+    scene._set_activity("looking", rows=[14], holes=["c14"])
+    scene._set_activity("looking", rows=[14], holes=["c14"])
+    assert len(updates) == 1
+    assert updates[0]["activity"] == {"phase": "looking", "rows": [14], "holes": ["c14"]}
+    assert updates[0]["fix"] == judgement()["fix"] and updates[0]["severity"] == "wrong"
+    assert "observation" in updates[0] and "last_model_error" in updates[0]
+
+
+def test_watcher_recovers_after_frame_error_and_honours_stop(scene, monkeypatch):
+    calls = []
+    def watch():
+        calls.append(True)
+        if len(calls) == 1:
+            raise ValueError("bad frame")
+        scene._stop.set()
+    monkeypatch.setattr(scene, "_watch", watch)
+    scene._watch_loop()
+    assert len(calls) == 2
+    assert scene.state()["activity"]["phase"] == "error"
+
+
+def test_pixel_view_does_not_invent_connection_between_simultaneous_plugs(scene, monkeypatch):
+    monkeypatch.setattr(scene, "_use_model", lambda: False)
+    scene._pixel_board([{"kind": "placed", "label": "c14", "x": 20},
+                        {"kind": "placed", "label": "c16", "x": 40}])
+    assert [p["holes"] for p in scene.parts] == [["c14"], ["c16"]]
+
+
 def test_problem_and_clear_are_emitted_without_placement(scene, monkeypatch):
     monkeypatch.setattr(vlm, "judge", lambda *a, **kw: judgement(changes=[]))
     assert observe(scene) is True

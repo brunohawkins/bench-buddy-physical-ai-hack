@@ -77,7 +77,7 @@ ui/            (Parthiv) landing page, chat with hands-free voice / optional pus
  "summary": "...", "narration": "One red jumper connects d20 to the top positive rail at row 9.", "status": "..."}
 ```
 
-`parts` uses the `ui/js/board.mjs` PARTS shape. Rails map as top + `+L`, top − `-L`, bottom + `+R`, bottom − `-R`. **Not done yet:** `board.mjs` still draws the hard-coded 555 parts. Parthiv's view should render `parts` from the board event instead.
+`parts` uses the `ui/js/board.mjs` PARTS shape. Rails map as top + `+L`, top − `-L`, bottom + `+R`, bottom − `-R`. The UI draws it in 3D: the board pane holds the breadboard twin (`figures/parts`, bundled to `ui/vendor/twin.bundle.mjs`), which simulates whatever vision reports. See `ui/README.md`.
 
 ## The radar demo build (curated.py RADAR_LED)
 
@@ -199,8 +199,27 @@ with a retry hint. Pause is handled immediately even while the tutor is busy; re
 Regression coverage uses generated audio, stubbed transcription/device callbacks and threaded UI input;
 an actual microphone conversation still needs a live rehearsal.
 
+### Integrated: live 3D UI and current main
+
+Merged `parthiv/ui` through `7b1bc2e` with the hands-free controls, wiring correction cards, fresh observations,
+small-change detection and stale-result guards from main. The brain, voice and radar demo remote branches were
+already ancestors of main. The browser now draws the observed board through `figures/parts`; its generated
+bundle is committed, so running Python needs no Node build. Developer builds use `cd figures && npm ci && npm run build:ui`.
+
+An empty, unpowered board starts without an invented supply module; session resets clear parts and lead maps.
+The twin accepts colour-first and pin-first descriptions (“V black, G grey, IO yellow”). Pin identity is never
+inferred from the destination rail, so a misplaced V lead stays V in the simulation. Unknown identities remain
+loose, and the UI reports unknown connections. With the model disabled, pixel updates show individual plug ends
+without inventing connections between simultaneously placed leads. Watcher errors retry and respect shutdown.
+
+Validated with Python regression tests, all four JavaScript circuit/layout suites, a fresh bundle build, and
+headless Chrome against an isolated Python UI server with simulated speech/board events. The browser check
+covered empty-board startup, hands-free status, mic pause/resume, typed input, live parts, activity, wiring
+correction cards and session reset. Camera and microphone hardware still need the user's live rehearsal.
+The circuit simulation assumes LED orientation and supply details; it supplements the vision checks.
+
 ## Also before the deadline
 
-- Parthiv: render `/api/board` `parts` in `board.mjs` (live 3D view) and make the presentation.
+- Parthiv: live 3D view done (`ui/README.md`, "3D twin"); make the presentation.
 - Record the ~1 min demo video: radar build guided by voice, vision catching a mistake, walk past, LED lights.
 - Make the repo public, then submit (team name, members, description, repo, video, tech: OpenCV, OpenAI gpt-6-astra vision + gpt-4o-mini-transcribe, ElevenLabs Flash TTS, Python stdlib web UI).
