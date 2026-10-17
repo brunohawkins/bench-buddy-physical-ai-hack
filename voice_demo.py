@@ -1,24 +1,11 @@
-"""Try the voice layer on its own: talk, hear it repeat what it heard, see the latency. Owner: L.
+"""Talk to Bench Buddy hands-free: real voice + LLM, fake camera + Arduino. Owner: L.
 
-    python voice_demo.py
+    .venv/bin/python voice_demo.py            (same as: python main.py --fake vision bench)
+    .venv/bin/python voice_demo.py --ptt      press Enter to talk instead
 """
-from dotenv import load_dotenv
+import sys
 
-load_dotenv()
-from voice import Voice  # noqa: E402  (needs .env loaded first)
+import main
 
-v = Voice()
-greeting = "Hi, I'm Bench Buddy. Say something and I'll repeat it."
-v.warm_cache([greeting])
-v.say(greeting)
-print(f"  speech started after {v.last_latency_ms} ms (cached)\n")
-
-while True:
-    text = v.listen()
-    if text.lower() in ("q", "quit", "exit"):
-        break
-    stt = f"transcribed in {v.last_stt_ms} ms" if v.last_stt_ms is not None else "typed"
-    v.say(f"I heard: {text}")
-    print(f"  {stt}; speech started after {v.last_latency_ms} ms (live)")
-    v.say(f"I heard: {text}")
-    print(f"  same line again: {v.last_latency_ms} ms (cached)\n")
+sys.argv = [sys.argv[0], "--fake", "vision", "bench", *sys.argv[1:]]
+main.main()

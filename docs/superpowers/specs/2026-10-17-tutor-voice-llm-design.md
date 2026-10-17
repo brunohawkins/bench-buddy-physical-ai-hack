@@ -1,6 +1,6 @@
 # Tutor mode: flexible voice + LLM layer
 
-Date: 2026-10-17 · Owner: L (voice + LLM) · Status: approved design, awaiting spec review
+Date: 2026-10-17 · Owner: L (voice + LLM) · Status: spec approved; Revision 1 (radar demo) applied
 
 ## Goal
 
@@ -14,11 +14,31 @@ right hole or a voltage is right comes from vision or the Arduino, never from th
 
 **Time budget:** 1–2 hours. Anything not listed here is out of scope.
 
+## Revision 1 (signed off 2026-10-17): the demo is the radar presence LED
+
+The team's demo circuit is now `radar-led-demo.md` (LD2402 radar → 1 kΩ → LED, USB 5 V, **no Arduino**). Changes
+to the design below:
+
+- **Curated projects live in a new `curated.py`** (L): `radar_led` (the demo, built from `radar-led-demo.md`) and
+  `555` (wrapping the existing `project.STEPS`, untouched). Each curated project has `name`, `match` keywords,
+  `required` parts (matched by keyword, e.g. "radar" or "LD2402"), `steps`, `finish` (what success looks like) and
+  `troubleshooting` notes (the doc's risks: 3.3 V vs 5 V supply, LED backwards, IO outputting serial, dim LED).
+- **Radar steps are `confirm`-checked** (no row map exists yet). Camera events are acknowledged and fed to the tutor
+  ("I saw a wire go into i20") but don't fail a step. If the team fixes rows later, a step can switch to `vision`.
+- **Finish:** after the last step, it asks the user to walk in front of the radar; the user confirming the LED lit
+  ends the session. No frequency measurement.
+- **Debug without an Arduino:** `bench` is optional. With no bench, NOT_WORKING (or tutor `debug`) runs an
+  LLM-guided checklist from the project's `troubleshooting` notes, one question at a time ("Is the LED's long leg on
+  the resistor side?"). With a bench (the 555 project), `debug.probe` as before.
+- **Parts parsing:** for `ic` and `other`, `value` is the part's short name ("LD2402", "radar", "breadboard") instead
+  of "-", so curated keyword matching works.
+- `main.py`: in tutor mode the real bench is only built if `SERIAL_PORT` is set; otherwise `bench=None`.
+
 ## Decisions
 
 | Question | Decision |
 | --- | --- |
-| Project scope | Any project the user asks for is planned by the LLM; "555 blinker" loads the curated `project.STEPS` (exact rows, voltage checks) so the demo is reliable |
+| Project scope | Any project the user asks for is planned by the LLM; curated projects (`radar_led` for the demo, `555`) load hand-checked steps so the demo is reliable |
 | Talk mode | Hands-free (energy-based voice activity detection), half-duplex (mic ignored while speaking). `--ptt` keeps Enter-to-talk |
 | Approach | Plan-driven tutor: one event queue, a controller that owns plan/step/pass-fail, one LLM tutor call per event that returns what to say plus an action the controller validates |
 | Old flow | `fsm.py` kept unchanged, reachable with `--script` |
@@ -47,8 +67,8 @@ right hole or a voltage is right comes from vision or the Arduino, never from th
 - Env: `VAD_MIN_RMS` (default 300) to tune for a noisy room.
 
 **`brain.py` — planner and tutor** (existing `classify`, `parse_parts`, `explain` stay)
-- `start(utterance) -> {"goal": str, "parts": [...], "unclear": [...], "curated": "555" | None}`: one
-  structured-output call. `curated` is "555" when the goal is a 555 blinker/flasher/timer LED.
+- `start(utterance) -> {"goal": str, "parts": [...], "unclear": [...], "curated": "radar_led" | "555" | None}`:
+  one structured-output call. `curated` is set when the goal matches a curated project (see Revision 1).
 - `plan(goal, parts) -> list[step]`: one LLM call for non-curated goals; 4–10 steps, each
   `{"id", "say", "why", "check": {"kind": "confirm"}}`. `say` is one or two spoken sentences.
 - `tutor(context, event) -> {"say": str, "action": "none" | "advance" | "repeat" | "debug"}`: one
