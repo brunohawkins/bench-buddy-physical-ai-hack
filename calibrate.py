@@ -183,8 +183,27 @@ def _clusters(values, gap):
     return groups
 
 
-def auto_calibrate(frame, rows: int = 63) -> tuple["Board", dict]:
-    """Board from one camera frame, no clicks. Raises CalibrationError if the board can't be found."""
+def flipped(board: "Board") -> "Board":
+    """The same grid with the board's ends swapped (row 1 <-> row N, column a <-> j)."""
+    c = board.corners
+    offsets = board.offsets.copy()
+    offsets[1:] = -offsets[1:][::-1]
+    return Board([c[2], c[3], c[0], c[1]], board.rows, offsets)
+
+
+def auto_calibrate(frame, rows: int = 63, prev: "Board | None" = None) -> tuple["Board", dict]:
+    """Board from one camera frame, no clicks. Raises CalibrationError if the board can't be found.
+    With prev, keep whichever orientation matches it, so row numbers never flip mid-session."""
+    board, info = _auto_calibrate(frame, rows)
+    if prev is not None and prev.rows == rows:
+        alt = flipped(board)
+        if np.linalg.norm(alt.hole_cam - prev.hole_cam, axis=1).mean() < \
+                np.linalg.norm(board.hole_cam - prev.hole_cam, axis=1).mean():
+            board, info = alt, {**info, "upright": not info["upright"]}
+    return board, info
+
+
+def _auto_calibrate(frame, rows: int) -> tuple["Board", dict]:
     best, errors = None, []
     for box, length, width in _board_candidates(frame):
         try:
@@ -319,13 +338,23 @@ def _fit(frame, box, length, width, rows: int) -> tuple["Board", dict]:
     if index[-1] != rows - 1:
         raise CalibrationError(f"found {index[-1] + 1} rows, expected {rows}")
 
-    # Orientation from the rail stripes: red above blue = upright.
+    # Orientation from the rail stripes: red above blue = upright. Only long straight lines count, so a
+    # red wire lying on the board can't outvote the stripes.
     hsv = cv2.cvtColor(rect, cv2.COLOR_BGR2HSV)
-    red = (cv2.inRange(hsv, (0, 50, 80), (10, 255, 255)) | cv2.inRange(hsv, (165, 50, 80), (180, 255, 255))) > 0
-    blue = cv2.inRange(hsv, (95, 50, 60), (130, 255, 255)) > 0
-    ry, by = np.nonzero(red)[0], np.nonzero(blue)[0]
-    stripes = len(ry) > 200 and len(by) > 200
-    upright = ry.mean() < by.mean() if stripes else True
+    red = cv2.inRange(hsv, (0, 50, 80), (10, 255, 255)) | cv2.inRange(hsv, (165, 50, 80), (180, 255, 255))
+    blue = cv2.inRange(hsv, (95, 50, 60), (130, 255, 255))
+
+    def stripe_ys(colour_mask):
+        segs = cv2.HoughLinesP(colour_mask, 1, np.pi / 180, 80, minLineLength=0.2 * out_w, maxLineGap=25)
+        if segs is None:
+            return []
+        segs = segs.reshape(-1, 4).astype(float)          # OpenCV 4 and 5 shape these differently
+        return [(y1 + y2) / 2 for x1, y1, x2, y2 in segs if abs(y2 - y1) < 0.1 * abs(x2 - x1)]
+
+    red_ys, blue_ys = stripe_ys(red), stripe_ys(blue)
+    votes = [r < min(blue_ys, key=lambda b: abs(b - r)) for r in red_ys] if blue_ys else []
+    stripes = len(votes) > 0
+    upright = sum(votes) >= len(votes) / 2 if stripes else True
 
     # (camera pixel, grid pixel) pairs for every terminal hole.
     src, dst = [], []

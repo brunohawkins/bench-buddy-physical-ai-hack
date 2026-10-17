@@ -51,7 +51,7 @@ CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far a
 
 # OpenCV HSV: H 0-180, S and V 0-255.
 HSV_RANGES = {
-    "red": [((0, 90, 60), (10, 255, 255)), ((170, 90, 60), (180, 255, 255))],
+    "red": [((0, 60, 60), (10, 255, 255)), ((165, 60, 60), (180, 255, 255))],    # incl. pale/salmon red
     "orange": [((10, 90, 60), (22, 255, 255))],
     "yellow": [((22, 90, 60), (35, 255, 255))],
     "green": [((35, 60, 40), (85, 255, 255))],
@@ -85,7 +85,9 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
     Also returns the connected-component labels of the full mask (plug + cable) for the colour test."""
     import cv2
     m = mask.astype(np.uint8)
-    n_wires, wire_labels = cv2.connectedComponents(m)
+    # group into wires on a slightly grown mask: plug and cable often show a small gap between them
+    _, grown = cv2.connectedComponents(cv2.dilate(m, np.ones((9, 9), np.uint8)))
+    wire_labels = np.where(mask, grown, 0)
     opened = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (PLUG_OPEN, PLUG_OPEN)))
     n, labels, stats, cents = cv2.connectedComponentsWithStats(opened)
     grey_b = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -162,8 +164,13 @@ def analyse(board, before, after, expect_rows: list[int], wire_colour: str | Non
         return CheckResult("fail", detail, rows_found), overlay
 
     if wire_colour:
+        import cv2
+        # colour of the cable only: the plug housing is black whatever the wire colour
         wire = np.isin(wire_labels, [e["blob"] for e in placed])
-        fractions = colour_fractions(after, wire)
+        housing = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (PLUG_OPEN, PLUG_OPEN)))
+        cable = wire & ~cv2.dilate(housing, np.ones((5, 5), np.uint8)).astype(bool)
+        fractions = colour_fractions(after, cable if cable.sum() > 0.5 * PITCH ** 2 else wire)
         if fractions.get(wire_colour, 0.0) < COLOUR_MIN:
             seen = max(fractions, key=fractions.get)
             looks = f"looks {seen}" if fractions[seen] >= COLOUR_MIN else f"doesn't look {wire_colour}"
@@ -241,7 +248,7 @@ class Vision:
         is pushed in). Keeps the current grid if calibration fails (e.g. a hand is in the way)."""
         import calibrate
         try:
-            board, _ = calibrate.auto_calibrate(raw, self.board.rows)
+            board, _ = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
             self.board = board
         except calibrate.CalibrationError:
             pass
