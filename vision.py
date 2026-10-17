@@ -404,6 +404,7 @@ class Vision:
         self.parts: list[dict] = []                # what the vision model says is on the board (see vlm.judge)
         self.narration = "The board is empty."    # plain-English description of the whole board, from the model
         self.summary = ""                        # the last change, one sentence
+        self.problem = None                       # wiring problem the model saw in the last change, if any
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
         self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
         FRAMES_DIR.mkdir(exist_ok=True)
@@ -566,8 +567,9 @@ class Vision:
             self.context = (self.context + [f"{who}: {text}"])[-20:]
 
     def describe(self) -> str:
-        """Plain English for the tutor: the last change, then the whole board (from the vision model)."""
-        return " ".join(t for t in (self.summary, self.narration) if t)
+        """Plain English for the tutor: any wiring problem first, then the last change, then the whole board."""
+        problem = f"PROBLEM: {self.problem}" if self.problem else ""
+        return " ".join(t for t in (problem, self.summary, self.narration) if t)
 
     def verify(self, step: str) -> CheckResult:
         """Ask the vision model whether the board shows `step` done correctly (uses the part list and the
@@ -622,6 +624,7 @@ class Vision:
         if isinstance(v.get("board"), list):
             self.parts = v["board"]
         self.narration = v.get("narration") or self.narration
+        self.problem = v.get("problem") or None
         if not changes:
             print(f"  [vlm] {time.time() - t0:.1f}s: nothing plugged in or pulled out", flush=True)
             self.status = "watching the board"
