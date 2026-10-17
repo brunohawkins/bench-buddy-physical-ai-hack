@@ -376,7 +376,9 @@ class Voice:
             from native_audio import MacAudio
             self._audio_io = MacAudio(on_audio)
             self._mic_stream = self._audio_io
-            print("[voice] echo cancellation active; speak to interrupt")
+            info = self._audio_io.diagnostics
+            print(f"[voice] echo cancellation active; mic {info['input_channels']} channels at "
+                  f"{int(info['input_rate'])} Hz -> channel 0, 16 kHz mono; speak to interrupt")
             return
         stream = sd.RawInputStream(samplerate=MIC_RATE, channels=1, dtype="int16", blocksize=FRAME,
                                    callback=on_audio)
@@ -424,6 +426,12 @@ class Voice:
         import sounddevice as sd
         if self._aec_requested:
             self._mic()
+            # Learn the room floor before the first greeting. Startup can otherwise calibrate
+            # against our own loud voice and miss a quieter person speaking afterwards.
+            deadline = time.monotonic() + 1
+            while self._capture and self._detector.floor is None and time.monotonic() < deadline:
+                if self._play_cancel.wait(.01):
+                    return b""
         # Synthesis may block on the network. Playback cancellation must not wait for its next chunk.
         incoming = queue.Queue(maxsize=8)
         cancel = self._play_cancel

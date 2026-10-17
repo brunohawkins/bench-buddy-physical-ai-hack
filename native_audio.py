@@ -48,9 +48,12 @@ class MacAudio:
                 if "error" in message:
                     raise RuntimeError(message["error"])
                 if message.get("ready"):
+                    self.diagnostics = message
                     if not message.get("echo_cancellation"):
                         raise RuntimeError("Voice processing is unavailable")
                     self._ready.set()
+                if "diagnostic" in message:
+                    print("[audio]", message)
                 if "mic" in message:
                     carry += base64.b64decode(message["mic"])
                     while len(carry) >= 960:

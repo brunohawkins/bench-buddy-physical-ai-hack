@@ -251,8 +251,17 @@ startup calibration failure is now untrusted until two fresh fits agree, includi
 Hardware validation: native helper received 16 kHz microphone blocks, silently played/drained PCM, and stopped
 queued playback; the cached greeting played with zero speech detections from its own echo in one local trial.
 Microphone authorization was granted (AVAuthorizationStatus=3); raw ambient audio measured ~158 RMS while
-the voice-processing path suppressed the quiet-room input to zero. Human speech through that path remains
-part of the live rehearsal, so the quiet-room playback check alone does not prove double-talk performance.
+the converted audio was zero. Follow-up diagnosis found this was a channel-conversion bug, not evidence of
+noise suppression: VoiceProcessingIO exposed nine channels and the automatic mono mapping discarded the input.
+The fix explicitly selects channel 0 before resampling, restoring nonzero PCM from this Mac's microphone.
+Native conversion tests exercise mono, stereo and nine-channel discrete layouts in both interleaved formats,
+without accessing hardware. A sustained nonzero input / zero output conversion now raises a microphone error.
+Startup diagnostics print the negotiated channel count and sample rate; `VOICE_DEBUG=1` shows input/output peaks.
+The earlier quiet-room playback trial was not valid evidence of echo suppression because its input was silent.
+The first greeting now waits briefly for room-noise calibration so its volume cannot set the detection floor.
+After the fix, a continuous-listening playback trial completed without a speech detection during the greeting.
+All pytest modules now isolate tutor/FSM logs too; importing test helpers previously bypassed the module-local
+log fixture and appended synthetic checks to the live log.
 Generated-audio/concurrency tests cover stopping before STT, cached/live/blocked synthesis, no partial cache,
 empty STT recovery and no advancement after interruption. LED tests cover supported correct/wrong rows,
 shorts, opposite halves, contradictory/hidden legs and preserving independent wrong-wire feedback.
