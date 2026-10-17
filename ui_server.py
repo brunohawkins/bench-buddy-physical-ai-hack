@@ -165,9 +165,13 @@ class UI:
                 self.end_headers()
                 try:
                     while True:
-                        frame = vision.camera.latest()
+                        # vision.view(): camera + grid, flat board with detected plugs/wires, status line
+                        frame = vision.view() if hasattr(vision, "view") else None
+                        if frame is None:
+                            frame = vision.camera.latest()
+                            if frame is not None:
+                                vision.board.draw_on_camera(frame, getattr(vision, "expect_rows", ()))
                         if frame is not None:
-                            vision.board.draw_on_camera(frame, getattr(vision, "expect_rows", ()))
                             frame = cv2.resize(frame, (960, int(frame.shape[0] * 960 / frame.shape[1])))
                             ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                             if ok:
