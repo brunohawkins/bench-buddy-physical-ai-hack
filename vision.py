@@ -72,7 +72,7 @@ LED_BODY_MAX = 3 * PITCH  # an LED's coloured body is ~1-2 holes across; a cable
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
 MODEL_MIN_CHANGE = 0.004  # a settled change smaller than this (fraction of the board) is absorbed without asking the model
-REALIGN_HOLES = 0.9      # re-align only from a fit that found this fraction of the holes (board uncovered)
+REALIGN_HOLES = 0.8      # re-align only from a fit that found this fraction of the holes (leads cover some)
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
 
 # OpenCV HSV: H 0-180, S and V 0-255.
