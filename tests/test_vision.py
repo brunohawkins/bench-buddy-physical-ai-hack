@@ -3,8 +3,11 @@
 
     .venv/bin/python -m pytest tests/      or      .venv/bin/python tests/test_vision.py
 """
+import os
 import sys
 from pathlib import Path
+
+os.environ["VISION_PARALLAX"] = "0"   # synthetic images are flat: no plug height
 
 import cv2
 import numpy as np

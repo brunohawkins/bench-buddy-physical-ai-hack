@@ -50,6 +50,8 @@ PLUG_MIN_AREA = 0.3 * PITCH ** 2     # smallest surviving blob treated as a plug
 PLUG_MAX_AREA = 8 * PITCH ** 2       # bigger than this is a hand or a component, not a plug
 PLUG_DARK = 80                       # Dupont housings are black: grey level below this is "plug dark"
 PLUG_DARK_MIN = 0.2                  # a candidate must be at least this dark (fraction of pixels) to be a plug
+PARALLAX = float(os.environ.get("VISION_PARALLAX", 0.045))  # a plug's top looks this fraction further from the
+                                     # frame centre than its hole (housing height / camera height); 0 = off
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
@@ -62,6 +64,7 @@ LED_MAX_AREA = 4 * PITCH ** 2      # bigger is a hand or glare, not an LED
 LED_ON_FRAMES = 3        # consecutive frames with a glow before reporting "on"
 LED_OFF_FRAMES = 6       # consecutive frames without before reporting "off"
 LED_WARMUP = 2.0         # seconds of learning the board with the LED off before judging
+LED_BODY_MAX = 3 * PITCH  # an LED's coloured body is ~1-2 holes across; a cable is longer
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
@@ -139,7 +142,7 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
             chosen = sorted({min(proj, key=proj.get), max(proj, key=proj.get)})
         for i in chosen:
             blob = labels == i
-            x, y = _pin_point(blob, wire_labels == wire, cents[i])
+            x, y = _parallax(board, *_pin_point(blob, wire_labels == wire, cents[i]))
             d = np.linalg.norm(board.hole_px - (x, y), axis=1)
             k = int(np.argmin(d))
             row, col = board.holes[k] if d[k] < END_SNAP else (None, None)
@@ -168,6 +171,18 @@ def _pin_point(blob, wire, centre):
     step = float(np.clip(far - 0.5 * PITCH, 0.0, PITCH))
     x, y = centre + u * step
     return float(x), float(y)
+
+
+def _parallax(board, x: float, y: float) -> tuple[float, float]:
+    """Move a plug-top point (warped) back towards the camera's centre, to the hole it stands in."""
+    centre = getattr(board, "cam_centre", None)
+    if centre is None or not PARALLAX:
+        return x, y
+    import cv2
+    cam = board.to_camera([(x, y)])[0]
+    cam = cam + PARALLAX * (np.float32(centre) - cam)
+    out = cv2.perspectiveTransform(np.float32(cam).reshape(1, 1, 2), board.H).reshape(2)
+    return float(out[0]), float(out[1])
 
 
 def colour_fractions(image, mask) -> dict[str, float]:
@@ -536,6 +551,7 @@ class Vision:
                 time.sleep(0.005)
                 continue
             last_id = frame_id
+            self.board.cam_centre = (frame.shape[1] / 2, frame.shape[0] / 2)   # for the parallax correction
             warped = self.board.warp(frame)
             grey = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(warped, None, fx=0.5, fy=0.5), cv2.COLOR_BGR2GRAY), (5, 5), 0)
             motion = 1.0 if prev is None else float((cv2.absdiff(grey, prev) > MOTION_PIXEL).mean())
@@ -568,6 +584,14 @@ class Vision:
         glow = (v >= LED_V) & (hsv[..., 1] >= LED_S) & (v - self._led_ref >= LED_RISE) & self._led_area
         n, labels, stats, cents = cv2.connectedComponentsWithStats(glow.astype(np.uint8))
         spots = [i for i in range(1, n) if LED_MIN_AREA <= stats[i, cv2.CC_STAT_AREA] <= LED_MAX_AREA]
+        if spots:                                   # a highlight on a long coloured cable is not an LED
+            body = ((hsv[..., 1] >= 90) & (v >= 80)).astype(np.uint8)
+            _, blabels, bstats, _ = cv2.connectedComponentsWithStats(body)
+            def on_cable(i):
+                ids = blabels[labels == i]
+                b = int(np.bincount(ids[ids > 0]).argmax()) if (ids > 0).any() else 0
+                return b > 0 and max(bstats[b, cv2.CC_STAT_WIDTH], bstats[b, cv2.CC_STAT_HEIGHT]) > LED_BODY_MAX
+            spots = [i for i in spots if not on_cable(i)]
         if not self.led["on"]:
             self._led_ref = 0.95 * self._led_ref + 0.05 * v          # learn the board with the LED off
         lit = bool(spots)
