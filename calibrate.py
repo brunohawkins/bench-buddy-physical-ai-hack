@@ -5,7 +5,7 @@ top-down board where each hole sits on a known pixel.
 
     python calibrate.py --rows 63 [--source N]
 
-Keys: click = place point (a magnifier follows the mouse), u = undo, r = reset, Enter = save, q = quit.
+Keys: click = place point (a magnifier follows the mouse), u = undo, r = reset, Enter or s = save, q = quit.
 After saving, the window keeps showing the live grid so you can check it lines up.
 """
 import argparse
@@ -127,7 +127,7 @@ def run(camera, rows: int) -> None:
             board.draw_on_camera(frame)
             flat = board.draw_grid(board.warp(raw))
             cv2.imshow("warped", flat)
-            msg = "Enter = save, u = undo, r = reset, q = quit"
+            msg = "Enter or s = save, u = undo, r = reset, q = quit"
         else:
             board = None
             msg = f"Click the centre of hole {labels[len(pts)]} ({len(pts) + 1}/4). u = undo, r = reset, q = quit"
@@ -145,7 +145,7 @@ def run(camera, rows: int) -> None:
             pts.pop()
         elif key == ord("r"):
             pts.clear()
-        elif key in (13, 10) and len(pts) == 4:
+        elif key in (13, 10, 3, ord("s")) and len(pts) == 4:
             save(pts, rows)
             print(f"saved {CALIB_PATH}")
     cv2.destroyAllWindows()
