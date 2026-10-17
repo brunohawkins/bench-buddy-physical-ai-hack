@@ -26,6 +26,40 @@ const ui = {
 const prebuilt = () => ALL.filter((id) => !ui.project.steps.some((s) => s.id === id));
 let board;
 
+// ---------------------------------------------------------------- 3D twin (figures/parts → vendor/twin.bundle.mjs)
+// The board pane shows the breadboard twin: vision's live part list drawn in 3D and simulated. The 2D board
+// stays underneath as the fallback (no WebGL) and keeps the old 555 handlers harmless.
+let twin = null;
+const twinQueue = [];                       // events that arrive before the twin has loaded
+function mountTwin() {
+  if (twin || !("WebGLRenderingContext" in window)) return;
+  twin = "loading";
+  import("../vendor/twin.bundle.mjs").then(({ mountTwin }) => {
+    twin = mountTwin($("twin"), { onStatus: simStatus });
+    $("twin").hidden = false;
+    $("board").hidden = true;
+    if (ui.twinDemo) twin.followScript("blinker-555");
+    for (const ev of twinQueue.splice(0)) toTwin(ev);
+  }).catch((err) => { console.warn("3D twin unavailable, using the 2D board", err); twin = null; });
+}
+function toTwin(ev) {
+  if (!twin || twin === "loading") return twinQueue.push(ev);
+  if (ev.type === "board") twin.applyVision(ev);
+  if (ev.type === "log") twin.applyLog(ev.line);
+}
+function simStatus({ simLit, realLit, agree }) {
+  $("simChip").hidden = simLit === null;
+  $("simChip").className = `sim-chip ${agree ? (simLit ? "on" : "") : "bad"}`;
+  $("simText").textContent = agree
+    ? `Simulation · LED ${simLit ? "on" : "off"}${realLit === null ? "" : " · matches the camera"}`
+    : `Simulation says LED ${simLit ? "on" : "off"}, camera sees it ${realLit ? "on" : "off"}`;
+}
+function narrate(ev) {
+  const text = ev.narration || ev.summary;
+  $("narration").hidden = !text;
+  $("narration").textContent = text || "";
+}
+
 // ---------------------------------------------------------------- landing → bench
 $("start").addEventListener("click", enterBench);
 $("back").addEventListener("click", () => {
@@ -45,6 +79,7 @@ function enterBench() {
       board.reveal(prebuilt());
       $("board").addEventListener("part-hover", (e) => focusPart(e.detail));
     }
+    mountTwin();
     if (!ui.started) connect();
   }, 380);
 }
@@ -73,10 +108,14 @@ async function connect() {
       send: (text) => post({ text }),
       ptt: (action) => post({ ptt: action }),
     };
+    // Seed the twin with what vision sees right now (the SSE "board" event only comes on a change).
+    fetch("/api/board").then((r) => (r.ok ? r.json() : null)).then((st) => st?.board && handle({ type: "board", ...st })).catch(() => {});
   } else {
     ui.mode = "demo";
     setConn("demo", "Demo");
     $("conn").title = "No ui_server.py found, so this is the built-in demo. Run: python main.py --fake --ui";
+    // The demo plays the 555 script, so the twin follows that project's steps (live.js).
+    if (twin && twin !== "loading") twin.followScript("blinker-555"); else ui.twinDemo = true;
     const demo = createDemo(handle);
     ui.transport = { send: (text) => demo.send(text) };
     demo.start();
@@ -102,9 +141,13 @@ function applyHello(h) {
 function handle(ev) {
   if (ev.type === "hello") { applyHello(ev); return; }
   if (ev.type === "status") return status(ev);
-  if (ev.type === "board") return boardEvent(ev);
+  if (ev.type === "board") {
+    if (!Array.isArray(ev.board)) return boardEvent(ev);   // the 2D demo's pulled/restored
+    narrate(ev);
+    return toTwin(ev);
+  }
   if (ev.type === "reset") return resetSession();
-  if (ev.type === "log") return onLog(ev.line, ev.replay);
+  if (ev.type === "log") { toTwin(ev); return onLog(ev.line, ev.replay); }
 }
 
 // The server replays its history to a fresh page, so start from a clean slate first.
@@ -259,14 +302,17 @@ const typingEl = () => Object.assign(document.createElement("div"), { className:
 function card(html) { const el = document.createElement("div"); el.className = "card"; el.innerHTML = html; return append(el); }
 
 function partsCard(parts, missing) {
+  // fsm.py logs {parts: [...]}, tutor.py logs the list itself; missing may be strings or {desc}.
+  const list = Array.isArray(parts) ? parts : parts.parts || [];
+  missing = missing.map((m) => (typeof m === "string" ? m : m.desc || JSON.stringify(m)));
   const name = (p) => {
     if (p.type === "resistor") return `${si(p.value)}Ω`;
     if (p.type === "capacitor") return `${si(p.value)}F`;
     if (p.type === "ic") return `${p.part} timer`;
-    return p.type.toUpperCase();
+    return String(p.type || p.desc || p.name || "part").toUpperCase();
   };
   card(`<div class="card-h">Parts I heard <span class="pill ${missing.length ? "fail" : "pass"}">${missing.length ? `${missing.length} missing` : "all set"}</span></div>
-    <div class="chips">${parts.parts.map((p) => `<span class="chip">${esc(name(p))}${p.qty > 1 ? ` ×${p.qty}` : ""}</span>`).join("")}
+    <div class="chips">${list.map((p) => `<span class="chip">${esc(name(p))}${p.qty > 1 ? ` ×${p.qty}` : ""}</span>`).join("")}
     ${missing.map((m) => `<span class="chip miss">${esc(m)}</span>`).join("")}</div>`);
 }
 function si(v) {

@@ -224,6 +224,37 @@ body:has(#bench:not([hidden])) .mat-marks :is(.minor,.deg){display:none}
 .cam-head select{max-width:55%;background:transparent;color:#cfe6d7;border:0;font:inherit;text-transform:none}
 .cam img,.cam video{display:block;width:100%}
 
+/* ---------- 3D twin (vendor/twin.bundle.mjs): the live, simulated breadboard ---------- */
+.twin-wrap{position:absolute;inset:0;z-index:1}
+.twin-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;outline:none;cursor:grab}
+.twin-canvas:active{cursor:grabbing}
+.twin-readout{position:absolute;z-index:2;top:64px;left:28px;margin:0;font:var(--t-caption);color:var(--mat-ink);font-variant-numeric:tabular-nums;pointer-events:none}
+.twin-sim{position:absolute;z-index:2;left:20px;bottom:16px;width:min(440px,calc(100% - 360px));min-width:260px}
+.twin-sim .sim{border-radius:14px;padding:10px 12px;background:rgba(247,245,239,.94);box-shadow:var(--shadow);color:var(--ink);font:var(--t-small);max-height:38vh;overflow:auto}
+.twin-sim .sim-controls{display:flex;flex-wrap:wrap;gap:6px}
+.twin-sim .sim-controls button{font:var(--t-caption);background:var(--paper-2);border:0;border-radius:8px;padding:6px 9px;cursor:pointer;color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line)}
+.twin-sim .sim-controls button[data-sim="switch"],.twin-sim .sim-controls button[data-sim="left"],.twin-sim .sim-controls button[data-sim="right"]{display:none}
+.twin-sim .sim-controls button[aria-pressed="true"]{background:#e3f4ea;color:#1d5a3a;box-shadow:inset 0 0 0 1px rgba(47,158,98,.55)}
+.twin-sim .sim-note{margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#fbe7e4;color:#6b211b}
+.twin-sim .sim-warn{list-style:none;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#fbe7e4;color:#6b211b}
+.twin-sim .sim-cols{display:grid;grid-template-columns:1fr 1fr;gap:2px 16px;margin-top:8px}
+.twin-sim h3{font:var(--t-label);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+.twin-sim ul{list-style:none;margin:0;padding:0}
+.twin-sim li{padding:1px 0}
+.twin-sim b{font-weight:700;margin-right:5px;font-variant-numeric:tabular-nums}
+.sim-chip{position:absolute;z-index:2;top:64px;right:20px;display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:9px;font:var(--t-caption);
+  background:rgba(247,245,239,.12);color:#e9f5ee;box-shadow:inset 0 0 0 1px rgba(214,240,224,.22);backdrop-filter:blur(6px)}
+.sim-chip i{width:7px;height:7px;border-radius:50%;background:#56605a}
+.sim-chip.on i{background:#ff5a3c;box-shadow:0 0 0 3px rgba(255,90,60,.25),0 0 10px #ff5a3c}
+.sim-chip.bad{background:rgba(216,71,61,.9);color:#fff;box-shadow:none}
+.sim-chip.bad i{background:#fff}
+.narration{position:absolute;z-index:2;top:102px;right:20px;max-width:min(360px,40%);margin:0;padding:9px 12px;border-radius:12px;font:var(--t-small);color:#e9f5ee;
+  background:rgba(16,30,23,.55);box-shadow:inset 0 0 0 1px rgba(214,240,224,.16);backdrop-filter:blur(6px)}
+@media (max-width:860px){
+  .twin-sim{left:12px;right:12px;width:auto;min-width:0}
+  .narration{left:12px;right:12px;max-width:none}
+}
+
 /* ---------- board (iso) ---------- */
 .board{position:relative;width:100%}
 .board .iso-svg{overflow:visible}

@@ -51,3 +51,24 @@ it is also written to `frames/board_state.json`.
 `parts` uses the `PARTS` shape in `js/board.mjs` (rails `+L -L +R -R` = top +, top -, bottom +, bottom -), so it can
 be drawn directly. `kind` is `wire`, `radar`, `resistor`, `led` or `other`; `to` is null until a wire's second end is in;
 `pins` lists every hole (the radar module has several).
+
+## 3D twin in the board pane
+
+The bench's board pane is the breadboard twin from `figures/parts` (three.js plus a circuit solver), bundled to
+`vendor/twin.bundle.mjs`. Every `board` event is turned into a layout on a full-size 63-row board by
+`figures/parts/from-vision.js` and simulated, so the view shows what is really plugged in and whether the LED should be lit.
+A wire with one end on the board counts as a radar lead: + rail → V, − rail → G, a row → IO, unless the user said which
+colour is which at the radar step. The chip at the top right compares the simulated LED with vision's `led`. The panel
+at the bottom left has the simulated parts and net voltages, plus USB and presence toggles; hovering a hole shows its voltage.
+Tutor lines also feed it: the `usb` step powers the rails. In demo mode the twin follows the 555 script instead (`live.js`).
+The 2D board (`js/board.mjs`) is only the fallback when WebGL is missing.
+
+Rebuild the bundle after changing anything in `figures/parts`:
+
+```bash
+cd figures && npm install && npm test && npm run build:ui
+```
+
+`python main.py --fake --ui` plays a whole radar build through `vision.ScriptedFakeVision`, so you can try the 3D view
+with no camera.
+

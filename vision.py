@@ -967,6 +967,23 @@ class Vision:
         cv2.destroyAllWindows()
 
 
+# What --fake "sees" for the radar demo (curated.RADAR_LED), in vlm.py's board shape, so the UI's 3D view
+# plays the build: each look-check adds its step's parts. The LED first lands a row off (36/37) to show
+# the twin and the tutor catching it.
+FAKE_RADAR_BUILD = [
+    ("power", "The red lead went into the top + rail and the black lead into the top - rail.",
+     [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["+top26"]},
+      {"id": "wire2", "part": "wire", "colour": "black", "holes": ["-top27"]}]),
+    ("io", "The yellow lead is in a30 and a resistor runs from b30 to b35.",
+     [{"id": "wire3", "part": "wire", "colour": "yellow", "holes": ["a30"]},
+      {"id": "r1", "part": "resistor", "colour": None, "holes": ["b30", "b35"]}]),
+    ("led", "The LED's legs are in c35 and c36.",
+     [{"id": "led", "part": "led", "colour": "red", "holes": ["c35", "c36"]}]),
+    ("ground", "A black jumper joins a36 to the top - rail.",
+     [{"id": "wire4", "part": "wire", "colour": "black", "holes": ["a36", "-top38"]}]),
+]
+
+
 class FakeVision:
     """Fails the first check one row off, then passes, to exercise the retry path."""
 
@@ -986,6 +1003,61 @@ class FakeVision:
     def wait_for_placement(self, expect_rows: list[int], wire_colour: str | None = None,
                            timeout: float | None = 120) -> CheckResult | None:
         return self.check_placement(Snapshot(image=None), expect_rows, wire_colour)
+
+
+class ScriptedFakeVision(FakeVision):
+    """FakeVision for main.py --fake: the tutor's look-checks play FAKE_RADAR_BUILD, and each change is published
+    like Vision.state() to listeners, so the UI's 3D view follows a whole radar build with no camera."""
+
+    def __init__(self):
+        super().__init__()
+        self.looks = 0
+        self.led_wrong_shown = False
+        self.parts: list[dict] = []
+        self.led = False
+        self.summary = ""
+        self.listeners: list = []
+
+    def state(self) -> dict:
+        narration = ("The board is empty." if not self.parts else
+                     "On the board: " + "; ".join(f"{p['colour'] + ' ' if p.get('colour') else ''}{p['part']} in "
+                                                   f"{', '.join(hole_label(h) for h in p['holes'])}" for p in self.parts) + ".")
+        return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts, "led": self.led,
+                "led_at": "c35" if self.led else None, "summary": self.summary, "narration": narration, "status": "fake"}
+
+    def _publish(self) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn(self.state())
+            except Exception as e:
+                print(f"[vision] listener failed: {e!r}", flush=True)
+
+    def verify(self, question: str) -> CheckResult:
+        if self.looks >= len(FAKE_RADAR_BUILD):
+            return CheckResult("pass", "Looks right.", [])
+        step, said, parts = FAKE_RADAR_BUILD[self.looks]
+        if step == "led" and not self.led_wrong_shown:
+            self.led_wrong_shown = True
+            self.parts = [*self.parts, {**parts[0], "holes": ["c36", "c37"]}]
+            self.summary = "The LED went into c36 and c37."
+            self._publish()
+            return CheckResult("fail", "The LED's legs are in rows 36 and 37; they should be in 35 and 36.", [36, 37])
+        ids = {p["id"] for p in parts}
+        self.parts = [p for p in self.parts if p["id"] not in ids] + parts
+        self.summary = said
+        self.looks += 1
+        self._publish()
+        return CheckResult("pass", said + " Looks good.", [])
+
+    def note(self, who: str, text: str) -> None:
+        """The tutor's conversation. When it asks the user to walk up to the radar, the LED lights a moment later."""
+        import curated
+        finish = next(s["say"] for s in curated.RADAR_LED["steps"] if s["id"] == "finish")
+        if who == "Bench Buddy" and text.strip() == finish and self.looks >= len(FAKE_RADAR_BUILD):
+            def light():
+                self.led, self.summary = True, "The LED lit up."
+                self._publish()
+            threading.Timer(2.0, light).start()
 
 
 if __name__ == "__main__":

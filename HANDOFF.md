@@ -77,7 +77,7 @@ ui/            (Parthiv) landing page, chat card with push-to-talk, isometric bo
  "summary": "...", "narration": "One red jumper connects d20 to the top positive rail at row 9.", "status": "..."}
 ```
 
-`parts` uses the `ui/js/board.mjs` PARTS shape. Rails map as top + `+L`, top − `-L`, bottom + `+R`, bottom − `-R`. **Not done yet:** `board.mjs` still draws the hard-coded 555 parts. Parthiv's view should render `parts` from the board event instead.
+`parts` uses the `ui/js/board.mjs` PARTS shape. Rails map as top + `+L`, top − `-L`, bottom + `+R`, bottom − `-R`. The UI draws it in 3D: the board pane holds the breadboard twin (`figures/parts`, bundled to `ui/vendor/twin.bundle.mjs`), which simulates whatever vision reports. See `ui/README.md`.
 
 ## The radar demo build (curated.py RADAR_LED)
 
