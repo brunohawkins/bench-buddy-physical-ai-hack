@@ -1,0 +1,29 @@
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+dist/
+build/
+
+# ML / robotics artifacts
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bag
+*.mcap
+wandb/
+logs/
+outputs/
