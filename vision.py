@@ -388,8 +388,7 @@ class Vision:
             if float(np.linalg.norm(again - self._realign.hole_px, axis=1).mean()) / PITCH < 0.15:
                 self.board, self._realign = new, None
                 self._led_ref = None                     # reference was in the old grid
-                if self._baseline_raw is not None:
-                    self.baseline = new.warp(self._baseline_raw)
+                # the baseline stays as it was flattened: if the board itself moved, the old frame needs the old grid
                 self.status = f"board moved {shift:.1f} holes: re-aligned"
                 print(f"  {self.status}", flush=True)
                 return self.board.warp(raw)
