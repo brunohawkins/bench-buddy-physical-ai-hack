@@ -55,12 +55,13 @@ END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 COMPONENT_MIN_AREA = 2 * PITCH ** 2  # a non-plug change this big (after erasing thin cable) is a component
 LED_V = 235              # a lit LED: brightness (HSV V) at least this...
-LED_S = 60               # ...with colour (saturation) at least this...
+LED_S = 120              # ...with strong colour (the pale rail stripes measure ~70)...
 LED_RISE = 40            # ...and at least this much brighter than the same spot with the LED off
 LED_MIN_AREA = 6         # pixels of glow
 LED_MAX_AREA = 4 * PITCH ** 2      # bigger is a hand or glare, not an LED
 LED_ON_FRAMES = 3        # consecutive frames with a glow before reporting "on"
 LED_OFF_FRAMES = 6       # consecutive frames without before reporting "off"
+LED_WARMUP = 2.0         # seconds of learning the board with the LED off before judging
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
@@ -549,10 +550,15 @@ class Vision:
         v = hsv[..., 2].astype(np.int16)
         if self._led_ref is None or self._led_ref.shape != v.shape:
             self._led_ref = v.astype(np.float32)
+            self._led_since = time.time()
+            self._led_area = self._terminal_area(v.shape)
+            return
+        if time.time() - self._led_since < LED_WARMUP:
+            self._led_ref = 0.8 * self._led_ref + 0.2 * v
             return
         if not still:
             return
-        glow = (v >= LED_V) & (hsv[..., 1] >= LED_S) & (v - self._led_ref >= LED_RISE)
+        glow = (v >= LED_V) & (hsv[..., 1] >= LED_S) & (v - self._led_ref >= LED_RISE) & self._led_area
         n, labels, stats, cents = cv2.connectedComponentsWithStats(glow.astype(np.uint8))
         spots = [i for i in range(1, n) if LED_MIN_AREA <= stats[i, cv2.CC_STAT_AREA] <= LED_MAX_AREA]
         if not self.led["on"]:
@@ -577,6 +583,14 @@ class Vision:
             self.events.append({"t": time.strftime("%H:%M:%S"), "kind": kind, "led": dict(self.led),
                                 "placed": [], "removed": [], "holes": [], "rows": []})
             self._event_cv.notify_all()
+
+    def _terminal_area(self, shape):
+        """Where an LED can sit: the hole area plus half a pitch, not the rail stripes."""
+        from calibrate import COL_POS, MARGIN_COL, MARGIN_ROW
+        area = np.zeros(shape, bool)
+        y0, y1 = MARGIN_COL - PITCH, MARGIN_COL + (COL_POS["j"] + 1) * PITCH
+        area[int(y0):int(y1), int(MARGIN_ROW - PITCH):int(MARGIN_ROW + self.board.rows * PITCH)] = True
+        return area
 
     def is_still(self) -> bool:
         with self._lock:

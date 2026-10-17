@@ -188,7 +188,7 @@ def test_led_turns_on_and_off():
     cv2.circle(lit, centre, 3, (200, 200, 255), -1)      # ...with a bright centre
     cam.scenes["led"] = lit
     v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
-    time.sleep(1.5)
+    time.sleep(3.0)                                      # past the LED warm-up
     cam.scene = "led"
     e = v.wait_for_event(timeout=5, kind="led_on")
     assert e is not None and abs(e["led"]["row"] - 30) <= 1, e
