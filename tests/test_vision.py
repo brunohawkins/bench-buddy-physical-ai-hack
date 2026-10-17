@@ -142,6 +142,7 @@ def test_watcher_reports_placement_and_removal():
     assert e is not None and e["kind"] == "removed", e and e["kind"]
     assert not e["placed"], e["placed"]
     assert not v.wires, v.wires
+    v.close()
 
 
 def test_cable_moving_is_not_a_placement():
@@ -199,6 +200,7 @@ def test_led_turns_on_and_off():
     cam.scene = "empty"
     e = v.wait_for_event(timeout=5, kind="led_off")
     assert e is not None, "LED never reported off"
+    v.close()
 
 
 def test_bright_red_wire_is_not_an_led():
@@ -213,6 +215,7 @@ def test_bright_red_wire_is_not_an_led():
     assert e is not None and e["kind"] == "placed", e and e["kind"]
     time.sleep(1.5)
     assert not v.led["on"], v.led
+    v.close()
 
 
 def test_model_judges_placement_and_tracks_state():
@@ -222,10 +225,11 @@ def test_model_judges_placement_and_tracks_state():
     assert parse_hole("d13") == (13, "d", None) and parse_hole("+top13") == (13, None, "top +")
     seen = []
 
-    def fake_judge(before, after, board=None, context=None, timeout=25, cam_before=None, cam_after=None):
+    def fake_judge(before, after, board=None, context=None, timeout=25, cam_before=None, cam_after=None, task=None):
         seen.append(board)
         return {"changes": [{"part": "wire", "action": "placed", "holes": ["d13"], "colour": "red"}],
                 "board": [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["d13", "+top13"]}],
+                "problem": None, "fix": None, "severity": None, "grid": "aligned",
                 "summary": "Red wire into d13.", "narration": "One red wire from d13 to the top + rail."}
     real = vlm.judge, vlm.available
     vlm.judge, vlm.available = fake_judge, (lambda: True)
@@ -242,6 +246,7 @@ def test_model_judges_placement_and_tracks_state():
         assert st["parts"][0]["from"] == ["d", 13] and st["parts"][0]["to"] == ["+L", 13], st["parts"]
         assert "red wire" in st["narration"], st
     finally:
+        v.close()
         vlm.judge, vlm.available = real
 
 

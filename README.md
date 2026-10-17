@@ -25,6 +25,33 @@ cp .env.example .env             # fill in keys, serial port, camera source
 python main.py --fake vision bench   # e.g. real voice + LLM, fake camera + Arduino
 ```
 
+For the radar demo with the phone camera and spoken guidance:
+
+```bash
+.venv/bin/python main.py --fake bench --ui
+```
+
+Vision checks each settled change against the current instruction and the whole circuit. A clearly observed
+mistake produces an immediate spoken correction with the observed hole and the intended move, without saying
+“done” or waiting for the tutor model. It finishes any speech already playing, suppresses repeated corrections
+for 20 seconds, and holds the current step until a fresh camera assessment clears the fault. Detection still
+requires an unobstructed, still board and the vision API response (typically 3–15 seconds in the previous live
+tests). Uncertain holes and grid alignment problems do not produce wiring accusations.
+
+Small local changes now trigger checks, and a misaligned grid gets a bounded recalibration and recheck. Delayed
+results are discarded if the board or current step changed. Use `VISION_VLM=0` for the existing pixel-only wire
+checks; full circuit checking needs the vision model. Camera corrections also appear in the browser chat.
+
+Run the offline regression suite (fake model responses, synthetic camera frames and captured speech text):
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+```
+
+Pytest uses temporary directories for frame artifacts and tutor logs. A physical camera/voice rehearsal is still
+needed to assess recognition accuracy on your lighting, board position and components.
+
 ## Layout
 
 | File | Owner | What |

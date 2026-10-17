@@ -61,3 +61,11 @@ def test_quick_intent():
     assert q("it didn't light").kind == "NOT_WORKING"
     assert q("can you say that again").kind == "REPEAT"
     assert q("why do we need a resistor") is None
+
+
+def test_custom_plan_preserves_circuit_for_perception():
+    b = offline_brain()
+    b._json = lambda *a, **kw: {"summary": "Two steps", "needed": [], "missing": [],
+                                "circuit": "IO -> resistor -> LED -> ground",
+                                "steps": [{"say": "Connect the LED", "why": "Show presence"}]}
+    assert b.plan("presence light", [])["circuit"] == "IO -> resistor -> LED -> ground"

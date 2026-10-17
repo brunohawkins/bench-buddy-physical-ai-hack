@@ -241,7 +241,8 @@ class Brain:
                  for i, s in enumerate(out["steps"]) if s["say"].strip()]
         if not steps:
             return None
-        return {"summary": out["summary"], "needed": out["needed"], "missing": out["missing"], "steps": steps}
+        return {"summary": out["summary"], "needed": out["needed"], "missing": out["missing"], "steps": steps,
+                "circuit": out.get("circuit")}
 
     def tutor(self, context: dict, event: dict) -> dict:
         """One tutoring turn -> {"say": str, "action": "none" | "advance" | "repeat" | "debug"}.

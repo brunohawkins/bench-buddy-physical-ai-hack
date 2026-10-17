@@ -17,8 +17,8 @@ The demo build is the LD2402 radar presence LED (`radar-led-demo.md`): the radar
 ```bash
 .venv/bin/python main.py --fake bench --ui      # tutor + real voice + real vision + browser UI on :8000
 .venv/bin/python vision.py                      # vision alone: prints every event/narration, OpenCV window
-.venv/bin/python tests/test_vision.py           # 16 vision tests (offline; the model path is faked)
-.venv/bin/python tests/test_tutor.py            # (and test_brain.py, test_vad.py; pytest not installed, run as scripts)
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q                  # full offline suite; synthetic camera + stubbed model/voice
 VISION_DEBUG=1 ...                               # saves every judged before/after pair + grid json to frames/debug/
 ```
 
@@ -40,7 +40,7 @@ calibrate.py   automatic hole-grid calibration from one frame: Otsu board mask, 
 vision.py      Vision: real-time loop (warp, motion/stillness, LED glow every frame) + watcher thread.
                When the board settles after a change:
                  hand over the board (thick skin-coloured change) or >12% changed -> wait
-                 change < 0.4%                     -> absorb (noise)
+                 change < 0.4%, no local blob       -> ignore as noise (retain baseline for cumulative change)
                  else, with an API key            -> vlm.judge(...)  (the model decides)
                  API error / no key               -> pixel rules (plug_ends: black plug housings, parallax fix)
                Keeps: parts (model's part list), narration, summary, problem, led, context (conversation).
@@ -123,31 +123,46 @@ TX and RX stay unplugged; tape them out of view.
   - re-align needs ≥80% of holes and two agreeing fits;
   - the model also sees raw camera photos and can say "grid misaligned".
 
-  The real fix is taping the board down, plus making "grid misaligned" trigger a recalibration (TODO below).
+  Keep taping the board down. Model-reported misalignment now triggers two agreeing calibration fits and one
+  re-judgement; an unreliable fit stays a warning and does not overwrite the known part list.
 - **Latency:** each model call takes about 3–15 s (four images at detail "original"). The watcher blocks while it waits, which is fine at bench pace.
-- **The tutor's LLM sometimes recites the next step early** while the controller is still on the current one. Saying "done" re-syncs.
+- **Tutor phrasing:** advance/repeat replies now leave instructions to the controller, including camera events.
+  Ordinary LLM replies still need live observation for conversational drift.
 - **ElevenLabs** caching sometimes returns ApiError (concurrency). Phrases are generated live instead. Lower `max_workers` in voice.py if it persists.
-- **The tests write `log.jsonl`** (shared with the running app).
+- **Pytest isolates tutor logs and frame artifacts** in temporary directories. The standalone vision test script
+  still writes frame artifacts; use pytest during live sessions.
 - **LED polarity and resistor value** can't be seen once parts are in; they come from what the user says.
 - **`bench_serial.py` is Arduino serial,** but the team is on a Raspberry Pi. The radar demo doesn't need the meter (run with `--fake bench`).
 
-## NEXT: real-time spoken error reports (requested)
+## Implemented: real-time spoken error reports
 
-Goal: the vision model notices what is WRONG as soon as it happens and Bench Buddy says it out loud, with the fix ("The LED's legs are both in row 35, so it's shorted. Move the short leg to row 36."), without waiting for "done".
+Goal: the vision model notices what is WRONG as soon as it happens and Bench Buddy says it out loud, with the fix ("The LED's legs share the same connected strip in row 35. Move the short leg to row 36."), without waiting for "done".
 
-**Already in place:**
-- `vlm.judge` returns `problem` for every settled change; its prompt asks for things like LED legs in the same row and wrong rails.
-- `Vision._model_step` stores it in `vision.problem`, prints it, and puts it in the event (`event["problem"]`).
-- `vision.describe()` now starts with `PROBLEM: ...` when there is one. The tutor's `_vision_feed` passes `describe()` to its LLM, so the tutor already gets told.
+`vlm.judge` now returns validated `problem`, `fix`, `severity` (`wrong` / `warning` / null), and `grid`
+(`aligned` / `misaligned` / `uncertain`). Confirmed problems are spoken directly by the vision feed through
+the tutor's shared speech lock, even while the tutor LLM is waiting. They are logged as `vision_problem`
+and shown as a wiring correction in the UI. Uncertain problems stay silent. The same correction is suppressed
+for 20 seconds; a clean assessment resets that suppression. A known fault blocks advancement until vision
+clears it. Camera checks that fail also speak their exact correction without another tutor LLM call.
 
-**To do:**
-1. **Speak it deterministically.** In `tutor.py` `_vision_feed`, put `"problem": e.get("problem")` on the queued event. In `handle()`, if `ev.get("problem")`, `self.say(...)` the problem plus the fix right away, without waiting for the tutor's choice of action, and log it (`check="vision_problem"`).
-2. **Make the problem actionable.** Extend the `JUDGE_PROMPT` reply with `"fix": "<exact move: which lead/leg from which hole to which hole>"` and `"severity": "wrong"|"warning"|null`. Speak only `wrong`.
-3. **Step-aware checking.** Pass the current step's `say`/`ask` into `judge()` (e.g. `vision.note("Step", step["say"])` when a step opens, or a dedicated `vision.step` field in the prompt). The model can then judge "is this change right for this step?" on every change, which is effectively `verify()` on every change.
-4. **Whole-circuit sanity pass.** After each change, also check the full netlist against the target circuit (V to +, G to −, IO to R to LED+ to LED− to −). Cheap option: a text-only call with `vision.parts` plus the target netlist, so the model call stays image-free.
-5. **Grid self-heal.** If `problem` contains "grid misaligned", force a recalibration (`calibrate.calibrate_from_camera(..., prev=self.board)`) and re-judge.
-6. Voice must not talk over itself. Use the tutor's existing `say()` queueing, and de-duplicate the same problem within about 20 s.
-7. Tests: extend `test_model_judges_placement_and_tracks_state` with a fake judge returning a problem, and assert the tutor says it (FakeVoice records `say`).
+`Vision.set_task(step, plan, circuit)` receives the explicit current step, completed/future steps and target
+circuit on each step transition. The same vision call checks the whole visible circuit, so there is no second
+netlist API call. Custom plans preserve their generated circuit description. User lead identities are retained
+separately from the last 20 conversation lines. Prompts distinguish the two halves of a row, separate/split
+rails, incomplete builds, hidden polarity and unknown wire identity.
+
+Perception now detects small local motion/changes as well as whole-board changes. It never absorbs a detected
+hand into its baseline. Grid errors trigger a bounded two-fit recovery and re-judgement. Malformed model
+responses fall back to pixel rules, and a frozen camera or a result from an older board/step cannot pass a check.
+The event stream retains a per-consumer cursor so events arriving during speech are not lost. Problems and
+their resolution emit assessment events even when no placement was recorded. Board state JSON includes all
+four assessment fields.
+
+New regression coverage is in `tests/test_perception.py` and `tests/test_tutor.py`: wrong-hole speech end to end,
+warning suppression, cooldown/recovery, speech serialization, busy tutor calls, stale frames/results,
+small changes, malformed replies, API failures, grid recovery and circuit context. These tests are offline;
+the updated prompts and thresholds still need a live phone-camera rehearsal. Model latency remains, typically
+3–15 seconds in the earlier live tests, plus 0.8 seconds of settling and any speech already playing.
 
 ## Also before the deadline
 

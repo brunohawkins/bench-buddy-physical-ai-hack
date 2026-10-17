@@ -137,6 +137,7 @@ function onLog(l, replay) {
   }
   if (l.parts) partsCard(l.parts, l.missing || []);
   if (l.check === "vision") visionResult(l);
+  if (l.check === "vision_problem") checkCard(l);
   if (l.check === "measure") measureResult(l);
   if (l.check === "probe") probeResult(l);
   if (l.said) return said(l.said, replay);
@@ -304,7 +305,7 @@ function si(v) {
   return `${v} `;
 }
 function checkCard(l) {
-  const title = l.check === "vision" ? "Camera check" : "Check";
+  const title = l.check === "vision_problem" ? "Wiring correction" : l.check === "vision" ? "Camera check" : "Check";
   card(`<div class="card-h">${title}${l.step ? ` · ${esc(l.step)}` : ""}<span class="pill ${l.result}">${esc(l.result)}</span></div>
     <div>${esc(l.detail)}</div>${l.frame ? `<img src="/${esc(l.frame)}" alt="Annotated camera frame from the check" onerror="this.remove()">` : ""}`);
 }

@@ -20,6 +20,7 @@ from physics import predict, within
 
 LOG_PATH = Path("log.jsonl")
 IDLE_AFTER = 45                          # seconds of quiet during a step before checking in (once per step)
+PROBLEM_COOLDOWN = 20                    # repeat a persistent error at most once in this many seconds
 GREETING = "Hi, I'm Bench Buddy. What do you want to build today?"
 # In INVENTORY, any of these means "I've got the parts, let's go".
 READY = ("next step", "what's next", "whats next", "what do i do", "let's start", "lets start", "let's go",
@@ -45,6 +46,10 @@ class Tutor:
         self.camera: deque = deque(maxlen=3)         # latest camera notes
         self.last_check = None
         self.last_event, self.nudged = time.time(), False
+        self._speech_lock = threading.RLock()       # camera corrections and normal replies share one voice
+        self._problem = None
+        self._problem_version = 0
+        self._spoken_problems = {}
 
     # --- plumbing ------------------------------------------------------------
 
@@ -58,12 +63,16 @@ class Tutor:
         with LOG_PATH.open("a") as f:
             f.write(json.dumps(line, default=str) + "\n")
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, expected_version=None) -> bool:
         if not text:
-            return
-        self.voice.say(text)
-        self.log(said=text, tts_ms=getattr(self.voice, "last_latency_ms", None))
-        self.recent.append(("buddy", text))
+            return True
+        with self._speech_lock:
+            if expected_version is not None and expected_version != self._problem_version:
+                return False
+            self.voice.say(text)
+            self.log(said=text, tts_ms=getattr(self.voice, "last_latency_ms", None))
+            self.recent.append(("buddy", text))
+        return True
 
     def goto(self, state: str) -> None:
         if state != self.state:
@@ -95,11 +104,53 @@ class Tutor:
             e = self.vision.wait_for_event(timeout=None)
             if not e:
                 continue
-            where = ", ".join(e.get("holes", []))
-            text = self.vision.describe() if hasattr(self.vision, "describe") else \
-                f"wire {e['kind']} {'from' if e['kind'] == 'removed' else 'at'} {where}"
-            self.events.put({"type": "vision", "kind": e["kind"], "holes": e.get("holes", []),
-                             "rows": e.get("rows", []), "text": text})
+            self._queue_vision(e)
+
+    def _queue_vision(self, e: dict) -> None:
+        """Use this observation's text, not mutable global state that may already describe a later frame."""
+        if hasattr(self.vision, "event_is_current") and not self.vision.event_is_current(e):
+            return
+        where = ", ".join(e.get("holes", []))
+        text = " ".join(t for t in (e.get("problem"), e.get("fix"), e.get("summary"), e.get("narration")) if t)
+        ev = {"type": "vision", "kind": e["kind"], "holes": e.get("holes", []), "rows": e.get("rows", []),
+              "text": text or f"{e['kind']} at {where}",
+              **{k: e.get(k) for k in ("problem", "fix", "severity", "assessment", "grid")},
+              **{k: e[k] for k in ("observed_period", "task_version") if k in e}}
+        # Do not wait behind a slow tutor LLM call. say() serializes with any speech already playing.
+        self._observe_problem(ev)
+        ev["feedback_delivered"] = True
+        self.events.put(ev)
+
+    def _observe_problem(self, ev: dict) -> bool:
+        wrong = ev.get("severity") == "wrong" and ev.get("problem") and ev.get("fix")
+        if wrong:
+            if not self._problem or any(self._problem[k] != ev.get(k) for k in ("problem", "fix", "severity")):
+                self._problem_version += 1
+            self._problem = {k: ev.get(k) for k in ("problem", "fix", "severity")}
+            self._problem.update({k: ev[k] for k in ("observed_period", "task_version") if k in ev})
+            self._speak_problem(self._problem)
+            return True
+        if ev.get("assessment") and ev.get("grid") == "aligned" and not ev.get("problem"):
+            if self._problem:
+                self._problem_version += 1
+            self._problem = None
+            self._spoken_problems.clear()           # the same mistake after a verified fix is a new mistake
+        return False
+
+    def _speak_problem(self, problem: dict) -> None:
+        text = " ".join(dict.fromkeys([problem["problem"].strip(), problem["fix"].strip()]))
+        key = re.sub(r"\W+", " ", text.lower()).strip()
+        with self._speech_lock:
+            if problem != self._problem or (hasattr(self.vision, "event_is_current")
+                                           and not self.vision.event_is_current(problem)):
+                return
+            now = time.monotonic()
+            if now - self._spoken_problems.get(key, -float("inf")) < PROBLEM_COOLDOWN:
+                return
+            self._spoken_problems = {k: t for k, t in self._spoken_problems.items() if now - t < PROBLEM_COOLDOWN}
+            self._spoken_problems[key] = now
+            self.log(check="vision_problem", result="fail", detail=text, **problem)
+            self.say(text)
 
     def run(self) -> None:
         threading.Thread(target=self.voice.warm_cache, args=(self.phrases(),), daemon=True).start()
@@ -127,8 +178,14 @@ class Tutor:
 
     def handle(self, ev: dict) -> None:
         if ev["type"] == "vision":
+            if hasattr(self.vision, "event_is_current") and not self.vision.event_is_current(ev):
+                return
+            if not ev.get("feedback_delivered"):
+                self._observe_problem(ev)
             self.camera.append(ev["text"])
             self.log(vision=ev["text"], kind=ev["kind"], holes=ev["holes"])
+            if ev.get("problem") or self._problem or ev["kind"] == "assessment":
+                return                              # already spoken if confirmed; uncertain readings never advance
             step = self.current()
             if self.state == "STEP" and step and step["check"]["kind"] == "vision" and ev["kind"] == "placed":
                 return self.check()
@@ -157,14 +214,21 @@ class Tutor:
 
     def respond(self, ev: dict) -> None:
         """Let the tutor talk, then follow its action where the controller allows it."""
+        version = self._problem_version
         out = self.brain.tutor(self.context(), ev)
+        if version != self._problem_version:
+            return                                  # a camera correction made this model reply obsolete
         self.log(tutor=out["action"], llm_ms=getattr(self.brain, "last_ms", None))
         action = out["action"]
-        if action in ("advance", "repeat") and ev["type"] == "speech":
+        if self._problem and action == "advance":
+            return self._speak_problem(self._problem)
+        if action in ("advance", "repeat"):
             # the LLM tends to recite the next instruction itself; the controller says it, so just acknowledge
-            self.say(ACKS[self.step_i % len(ACKS)] if action == "advance" else "")
+            line = ACKS[self.step_i % len(ACKS)] if action == "advance" and ev["type"] == "speech" else ""
         else:
-            self.say(out["say"])
+            line = out["say"]
+        if not self.say(line, expected_version=version) or version != self._problem_version:
+            return
         if action == "repeat":
             self.say_step()
         elif action == "debug" and not self.troubleshooting:
@@ -298,22 +362,36 @@ class Tutor:
         if step is None:
             return self.finish()
         self.goto("STEP")
+        self._set_vision_task(step)
         self.before = self.vision.snapshot() if step["check"]["kind"] == "vision" else None
         self.say_step()
 
     def say_step(self) -> None:
+        if self._problem:
+            return self._speak_problem(self._problem)
         step = self.current()
         self.say(step["say"] if step else (self.project or {}).get("done", "We're all done."))
 
     def finish(self) -> None:
         self.goto("DONE")
+        self._set_vision_task(None)
         self.say(self.project["done"] if self.project else
                  "That's every step. Nice work! Tell me if anything isn't working.")
+
+    def _set_vision_task(self, step) -> None:
+        setter = getattr(self.vision, "set_task", None)
+        if setter:
+            plan = [{"id": s["id"], "say": s["say"], "check": s["check"], "completed": i < self.step_i}
+                    for i, s in enumerate(self.steps)]
+            setter(step=step, plan=plan, circuit=(self.project or self.plan or {}).get("circuit"))
 
     # --- checks -------------------------------------------------------------------
 
     def check(self) -> None:
         """Run the current step's check; pass -> next step, otherwise explain and stay."""
+        if self._problem:
+            return self._speak_problem(self._problem)
+        version = self._problem_version
         step = self.current()
         chk = step["check"]
         self.goto("CHECK")
@@ -333,15 +411,23 @@ class Tutor:
             return self.measure_freq()
         else:                                        # confirm, or a meter check with no Arduino attached
             status, detail = "pass", "confirmed"
+        if version != self._problem_version:
+            self.goto("STEP")
+            return                                  # a problem arrived during verification; never advance past it
         self.last_check = {"step": step["id"], "result": status, "detail": detail}
         self.log(step=step["id"], check=chk["kind"], result=status, detail=detail, frame=frame)
         if status == "pass":
             if chk["kind"] in ("vision", "look"):
-                self.say(detail)
+                self.say(detail, expected_version=version)
+            if version != self._problem_version:
+                self.goto("STEP")
+                return
             return self.open_step(self.step_i + 1)
         self.goto("STEP")
         if status == "unsure":
             return self.say("I can't see it clearly. Move your hand away, then say done.")
+        if chk["kind"] in ("vision", "look"):
+            return self.say(detail, expected_version=version)
         out = self.brain.tutor(self.context(), {"type": "check", **self.last_check})
         self.say(out["say"] or detail)
 
@@ -391,6 +477,7 @@ class Tutor:
             "recent": [f"{who}: {text}" for who, text in self.recent],
             "camera": list(self.camera),
             "last_check": self.last_check,
+            "vision_problem": self._problem,
         }
 
 

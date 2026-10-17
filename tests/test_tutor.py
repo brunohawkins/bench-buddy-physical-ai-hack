@@ -223,3 +223,139 @@ def test_substitute_parts_replan_once():
     speech(t, "I don't have a 2N2222 but I have a BC547")
     assert len(b.plans) == 2 and t.state == "STEP"
     assert any("still need a photoresistor" in x for x in t.voice.said)
+
+
+def fault(**changes):
+    return {"type": "vision", "kind": "placed", "holes": ["d34"], "rows": [34], "text": "LED in d34.",
+            "problem": "The LED leg is in d34; it needs row 35.", "fix": "Move that LED leg from d34 to d35.",
+            "severity": "wrong", "assessment": True, "grid": "aligned", **changes}
+
+
+def test_wrong_hole_is_spoken_without_brain_or_done_and_blocks_advancement():
+    b = StubBrain({"say": "Looks good", "action": "advance"})
+    t = make(b)
+    speech(t, "radar light please")
+    t.voice.said.clear()
+    t.handle(fault())
+    assert t.voice.said == [fault()["problem"] + " " + fault()["fix"]]
+    assert b.tutor_calls == 0 and t.step_i == 0
+    speech(t, "done")
+    assert t.step_i == 0 and b.tutor_calls == 0
+    assert '"check": "vision_problem"' in tutor.LOG_PATH.read_text()
+
+
+def test_duplicate_problem_suppressed_for_twenty_seconds_and_reset_after_fix(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(tutor.time, "monotonic", lambda: now[0])
+    t = make(StubBrain())
+    t.handle(fault())
+    now[0] += 19
+    t.handle(fault())
+    assert len(t.voice.said) == 1
+    now[0] += 2
+    t.handle(fault())
+    assert len(t.voice.said) == 2
+    t.handle(fault(kind="assessment", problem=None, fix=None, severity=None))
+    assert t._problem is None
+    t.handle(fault())
+    assert len(t.voice.said) == 3
+
+
+def test_uncertain_camera_warning_does_not_accuse_or_advance():
+    b = StubBrain({"say": "Wrong hole!", "action": "advance"})
+    t = make(b)
+    speech(t, "radar light please")
+    t.voice.said.clear()
+    t.handle(fault(severity="warning", problem="Possibly the wrong row; the hand hides it."))
+    assert t.voice.said == [] and t.step_i == 0 and b.tutor_calls == 0
+
+
+def test_warning_does_not_clear_an_existing_fault():
+    t = make(StubBrain())
+    t.handle(fault())
+    t.handle(fault(severity="warning", problem="Grid misaligned", grid="misaligned"))
+    assert t._problem is not None
+
+
+def test_fault_is_spoken_even_without_placement_event():
+    t = make(StubBrain())
+    t.handle(fault(kind="assessment", holes=[], rows=[]))
+    assert fault()["fix"] in t.voice.said[0]
+
+
+def test_queue_preserves_fault_and_speaks_before_the_controller_receives_it():
+    t = make(StubBrain())
+    t._queue_vision(fault(summary="LED in d34"))
+    assert len(t.voice.said) == 1
+    e = t.events.get_nowait()
+    assert e["fix"] == fault()["fix"] and e["severity"] == "wrong"
+    t.handle(e)
+    assert len(t.voice.said) == 1 and t.brain.tutor_calls == 0
+
+
+def test_camera_corrects_while_tutor_model_is_busy_and_discards_its_reply():
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    class SlowBrain(StubBrain):
+        def tutor(self, context, event):
+            entered.set()
+            assert release.wait(2)
+            return {"say": "Looks perfect!", "action": "advance"}
+    t = make(SlowBrain())
+    speech(t, "radar light please")
+    t.voice.said.clear()
+    thread = threading.Thread(target=t.respond, args=({"type": "speech", "text": "Is this right?"},))
+    thread.start()
+    try:
+        assert entered.wait(2)
+        t._queue_vision(fault())
+        assert t.voice.said == [fault()["problem"] + " " + fault()["fix"]]
+    finally:
+        release.set()
+        thread.join(2)
+    assert t.step_i == 0 and "Looks perfect!" not in t.voice.said
+
+
+def test_correction_waits_for_existing_speech_without_overlapping():
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    t = make(StubBrain())
+    class BlockingVoice(StubVoice):
+        def say(self, text):
+            self.said.append(text)
+            if text == "Current instruction":
+                entered.set()
+                assert release.wait(2)
+    t.voice = BlockingVoice()
+    normal = threading.Thread(target=t.say, args=("Current instruction",))
+    normal.start()
+    assert entered.wait(2)
+    alert = threading.Thread(target=t._queue_vision, args=(fault(),))
+    alert.start()
+    try:
+        assert t.voice.said == ["Current instruction"]
+    finally:
+        release.set()
+        normal.join(2)
+        alert.join(2)
+    assert len(t.voice.said) == 2 and fault()["fix"] in t.voice.said[1]
+
+
+def test_verified_correction_releases_step_and_does_not_repeat_fault():
+    t = make(StubBrain())
+    speech(t, "radar light please")
+    t.handle(fault())
+    t.handle(fault(kind="assessment", problem=None, fix=None, severity=None))
+    speech(t, "done")
+    assert t.step_i == 1 and t._problem is None
+
+
+def test_open_step_sends_explicit_task_and_circuit_to_vision():
+    t = make(StubBrain())
+    tasks = []
+    t.vision.set_task = lambda **kw: tasks.append(kw)
+    speech(t, "radar light please")
+    speech(t, "done")
+    assert tasks[-1]["step"]["id"] == "power"
+    assert tasks[-1]["plan"][0]["completed"] is True
+    assert "IO -> row 30" in tasks[-1]["circuit"]

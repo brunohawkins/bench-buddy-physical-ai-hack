@@ -45,6 +45,7 @@ DEBUG = bool(os.environ.get("VISION_DEBUG"))   # save every evaluated before/aft
 MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
 MOTION_STILL = 0.003     # fraction of moving pixels below which the board counts as still
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
+FRAME_TIMEOUT = 2.0      # a disconnected/frozen camera must not count as a stable current view
 DIFF_PIXEL = 35.0        # Lab distance for a pixel to count as changed
 SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
 PLUG_OPEN = int(0.65 * PITCH) | 1    # opening kernel: wider than a cable, narrower than a plug
@@ -71,7 +72,8 @@ LED_WARMUP = 2.0         # seconds of learning the board with the LED off before
 LED_BODY_MAX = 3 * PITCH  # an LED's coloured body is ~1-2 holes across; a cable is longer
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
-MODEL_MIN_CHANGE = 0.004  # a settled change smaller than this (fraction of the board) is absorbed without asking the model
+MODEL_MIN_CHANGE = 0.004  # below this whole-board fraction, look for a local change instead
+MODEL_MIN_BLOB = 0.35 * PITCH ** 2  # a single plug/leg can change much less than 0.4% of a full board
 REALIGN_HOLES = 0.8      # re-align only from a fit that found this fraction of the holes (leads cover some)
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
 
@@ -258,12 +260,15 @@ def hand_in_view(after, mask) -> bool:
 
 def judge_placed(event: dict, expect: list, wire_colour: str | None) -> CheckResult:
     """Pass/fail for a model-judged placement event against the expected rows / rails ("+", "top -", ...)."""
+    if event.get("problem"):
+        detail = " ".join(t for t in (event.get("problem"), event.get("fix")) if t)
+        return CheckResult("fail" if event.get("severity") == "wrong" else "unsure", detail)
     got = [(h, *parse_hole(h)) for h in event["placed"]]
     got = [g for g in got if g[1] is not None]
 
     def matches(want, g):
-        _, row, _, rail = g
-        return row == want if isinstance(want, int) else (rail is not None and str(want) in rail)
+        _, row, col, rail = g
+        return col is not None and row == want if isinstance(want, int) else (rail is not None and str(want) in rail)
 
     want_txt = " and ".join(f"row {w}" if isinstance(w, int) else f"the {w} rail" for w in expect)
     rows_found = sorted({g[1] for g in got if g[2]})
@@ -359,7 +364,7 @@ def draw_result(board, warped, overlay: dict | None, expect_rows=()):
 # --- real-time -----------------------------------------------------------------------
 
 class Vision:
-    def __init__(self, camera, board=None, rows: int = 63, persist: bool = True):
+    def __init__(self, camera, board=None, rows: int = 63, persist: bool = True, start_threads: bool = True):
         import calibrate
         self.camera = camera
         self.persist = persist                    # write calib.json (off in tests)
@@ -386,8 +391,10 @@ class Vision:
         self.overlay: dict | None = None          # last check's changed area + wire ends, drawn on the live view
         self.status = ""                          # last check's detail line
         self._lock = threading.Lock()
+        self._stop = threading.Event()
         self._warped = None
         self._raw = None
+        self._frame_at = 0.0
         self._motion = 1.0
         self._still_since = time.time()
         self._fps = 0.0
@@ -401,22 +408,50 @@ class Vision:
         self._led_hits = 0                        # consecutive frames with / without a glow (debounce)
         self._led_ok = None                       # still period the watcher has accounted for (LED judged after)
         self._event_cv = threading.Condition()
+        self._event_cursor = threading.local()     # a slow consumer must not lose events while speaking
         self.parts: list[dict] = []                # what the vision model says is on the board (see vlm.judge)
         self.narration = "The board is empty."    # plain-English description of the whole board, from the model
         self.summary = ""                        # the last change, one sentence
         self.problem = None                       # wiring problem the model saw in the last change, if any
+        self.fix, self.severity, self.grid = None, None, "aligned"
+        self.task = {}
+        self._task_version = 0
+        self._force_assess = True                  # inspect an already-populated board at startup, too
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
         self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
+        self._build_notes: list[str] = []         # preserve user lead identities beyond the rolling dialogue
         FRAMES_DIR.mkdir(exist_ok=True)
-        threading.Thread(target=self._loop, daemon=True).start()
-        threading.Thread(target=self._watch_loop, daemon=True).start()
+        if start_threads:
+            threading.Thread(target=self._loop, daemon=True).start()
+            threading.Thread(target=self._watch_loop, daemon=True).start()
+
+    def close(self) -> None:
+        self._stop.set()
+        with self._event_cv:
+            self._event_cv.notify_all()
+
+    def set_task(self, step=None, plan=(), circuit=None) -> None:
+        """Keep explicit build instructions separate from the rolling conversation."""
+        with self._lock:
+            self.task = {"current_step": step, "plan": list(plan), "target_circuit": circuit}
+            self._task_version += 1
+            self._force_assess = True
+
+    def _observation_current(self, period, version) -> bool:
+        current, _ = self._stable_board()
+        return current == period and version == self._task_version and not self._stop.is_set()
+
+    def event_is_current(self, event: dict) -> bool:
+        return "observed_period" not in event or self._observation_current(event["observed_period"],
+                                                                          event["task_version"])
 
     # --- automatic watching ---------------------------------------------------------
 
     def _stable_board(self):
         """(still-period id, raw frame) if the board is currently still, else (None, None)."""
         with self._lock:
-            if self._raw is None or time.time() - self._still_since < STILL_FOR:
+            if self._raw is None or time.time() - self._still_since < STILL_FOR \
+                    or time.monotonic() - self._frame_at > FRAME_TIMEOUT:
                 return None, None
             return self._still_since, self._raw.copy()
 
@@ -452,8 +487,10 @@ class Vision:
         try:
             new, info = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
         except calibrate.CalibrationError:
+            self._realign = None
             return self.board.warp(raw)
         if info.get("holes", 0) < REALIGN_HOLES * self.board.rows * 10:
+            self._realign = None
             return self.board.warp(raw)                  # parts or a hand cover holes: the fit can slip a hole
         moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
         shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
@@ -471,29 +508,51 @@ class Vision:
                 return self.board.warp(raw)
         self._realign = new
         return self.board.warp(raw)
-        moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
-        shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
-        if shift > MOVED:
-            self.board = new
-            self._led_ref = None                  # reference was in the old grid
-            self.status = f"board moved {shift:.1f} holes: re-aligned"
-            print(f"  {self.status}", flush=True)
-        return self.board.warp(raw)
+
+    def _recover_grid(self, raw, period):
+        """Require two agreeing, well-populated fits before rejudging a model-reported grid error."""
+        import calibrate
+        try:
+            first, info = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
+            current, fresh = self._stable_board()
+            if current != period:
+                return None
+            second, info2 = calibrate.auto_calibrate(fresh, self.board.rows, prev=self.board)
+            if min(info.get("holes", 0), info2.get("holes", 0)) < REALIGN_HOLES * self.board.rows * 10:
+                return None
+            import cv2
+            again = cv2.perspectiveTransform(second.hole_cam.reshape(-1, 1, 2), first.H).reshape(-1, 2)
+            if np.linalg.norm(again - first.hole_px, axis=1).mean() / PITCH >= 0.15:
+                return None
+            # Before and after may show the board in different positions: fit each in its own camera frame.
+            baseline = self.baseline
+            if self._baseline_raw is not None:
+                old, old_info = calibrate.auto_calibrate(self._baseline_raw, self.board.rows, prev=self.board)
+                if old_info.get("holes", 0) < REALIGN_HOLES * self.board.rows * 10:
+                    return None
+                baseline = old.warp(self._baseline_raw)
+        except calibrate.CalibrationError:
+            return None
+        self.board, self._realign, self.baseline = second, None, baseline
+        self._led_ref = None
+        self._save_board()
+        return second.warp(fresh), fresh
 
     def _watch_loop(self):
-        import calibrate
         seen = None                               # still period already handled
         big = 0                                   # consecutive still periods with a big change
-        while True:
-            time.sleep(0.1)
+        while not self._stop.wait(0.1):
             if self._busy:
                 continue
             period, raw = self._stable_board()
-            if period is None or period == seen:
+            version = self._task_version
+            if period is None or (period, version) == seen:
                 continue
             board_img = self._aligned(raw)
+            if self._realign is not None:
+                continue                          # get the second fit even if nothing moves again
             if self.baseline is None:
-                self.baseline, self._baseline_raw, seen = board_img, raw, period
+                self.baseline, self._baseline_raw = board_img, raw
                 self._led_rebase(board_img, period, full=True)
                 self._save_board()
                 self.status = "watching the board"
@@ -501,19 +560,31 @@ class Vision:
             mask = change_mask(self.baseline, board_img)
             if DEBUG:
                 self._debug_dump(self.baseline, board_img, mask)
-            if mask.mean() > TOO_MUCH or hand_in_view(board_img, mask):
+            if hand_in_view(board_img, mask):
+                seen = (period, version)
+                self.status = "waiting for hands to clear the board"
+                continue                          # never learn an occluding hand as the new board
+            if mask.mean() > TOO_MUCH:
                 big += 1
-                seen = period                     # wait for the next movement
+                seen = (period, version)          # wait for the next movement
                 if big >= RELEARN_AFTER:          # it's not going away: accept the board as it is now
                     self.baseline, self._baseline_raw, big = board_img, raw, 0
                     self.status = "re-learned the board"
+                    self._force_assess, seen = True, None
                 else:
                     self.status = "something big is over the board"
                 continue
             big = 0
-            if self._use_model() and self._model_step(mask, board_img, raw, period):
-                seen = period
-                continue
+            if self._use_model():
+                accepted = self._model_step(mask, board_img, raw, period)
+                if accepted is not False:
+                    if accepted:
+                        seen = (period, version)
+                    continue                      # None: the board/task changed while the API was running
+            self._force_assess = False
+            if self.grid != "aligned":
+                seen = (period, version)
+                continue                          # a failed API call cannot make an untrusted grid safe for pixel checks
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
             ends = [self._snap_removed(e) for e in ends]
             ends = [e for e in ends if e["label"] is not None and not self._near_known_wire(e)]
@@ -527,7 +598,7 @@ class Vision:
                     self.status = f"something changed at rows {rows[0]}-{rows[-1]}"
                     print(f"[{event['t']}] {self.status}", flush=True)
                     self._emit(event)
-                self.baseline, self._baseline_raw, seen = board_img, raw, period    # cable moved / lighting drift: absorb it
+                self.baseline, self._baseline_raw, seen = board_img, raw, (period, version)
                 self._led_rebase(board_img, period, full=bool(rows))
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
@@ -544,7 +615,7 @@ class Vision:
             removed = sorted({e["label"] for e in ends if e["kind"] == "removed"})
             kind = "moved" if placed and removed else "placed" if placed else "removed"
             event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
-                     "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed"}),
+                     "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed"} - {None}),
                      "before": self.baseline, "after": board2, "overlay": {"mask": mask, "ends": ends}}
             for e in ends:
                 if e["kind"] == "removed":
@@ -556,7 +627,7 @@ class Vision:
                     ([f"removed from {', '.join(removed)}"] if removed else [])
             self.status = "wire " + " and ".join(parts)
             print(f"[{event['t']}] {self.status}", flush=True)
-            self.baseline, self._baseline_raw, seen = board2, raw2, period
+            self.baseline, self._baseline_raw, seen = board2, raw2, (period, version)
             self._led_rebase(board2, period, full=True)
             self._save_board()
             self._emit(event)
@@ -564,28 +635,41 @@ class Vision:
     def note(self, who: str, text: str) -> None:
         """Conversation context for the vision model, e.g. note("User", "the black lead is ground")."""
         if text:
-            self.context = (self.context + [f"{who}: {text}"])[-20:]
+            with self._lock:
+                line = f"{who}: {text}"
+                self.context = (self.context + [line])[-20:]
+                if who == "User":
+                    self._build_notes = (self._build_notes + [line])[-60:]
+
+    def _vision_context(self) -> str:
+        with self._lock:
+            return "\n".join(self._build_notes + [line for line in self.context if not line.startswith("User:")])
 
     def describe(self) -> str:
         """Plain English for the tutor: any wiring problem first, then the last change, then the whole board."""
-        problem = f"PROBLEM: {self.problem}" if self.problem else ""
+        problem = f"{self.severity or 'warning'}: {self.problem} {self.fix or ''}" if self.problem else ""
         return " ".join(t for t in (problem, self.summary, self.narration) if t)
 
     def verify(self, step: str) -> CheckResult:
         """Ask the vision model whether the board shows `step` done correctly (uses the part list and the
         conversation). For steps the pixel rules can't check, e.g. "connect the radar's black lead to ground"."""
         import vlm
-        with self._lock:
-            warped = None if self._warped is None else self._warped.copy()
-            raw = None if self._raw is None else self._raw.copy()
-        if warped is None or not vlm.available():
+        period, raw = self._stable_board()
+        version = self._task_version
+        if raw is None or not vlm.available() or self.grid != "aligned":
             return CheckResult("unsure", "I can't see the board right now.")
+        warped = self.board.warp(raw)
         try:
             r = vlm.verify(vlm.labelled_crop(self.board, warped, None, self.expect_rows, pad_rows=0), step,
-                           self.parts, "\n".join(self.context), camera=vlm.camera_view(raw, self.board))
+                           self.parts, self._vision_context() + "\nBuild task: " + json.dumps(self.task),
+                           camera=vlm.camera_view(raw, self.board))
+            if not isinstance(r, dict) or not isinstance(r.get("detail"), str):
+                raise ValueError("invalid verification reply")
         except Exception as e:
             print(f"  [vlm] verify failed: {e!r}", flush=True)
             return CheckResult("unsure", "I couldn't check that just now. Say done to try again.")
+        if not self._observation_current(period, version):
+            return CheckResult("unsure", "The board changed while I was checking. Hold it still and try again.")
         status = r.get("status") if r.get("status") in ("pass", "fail", "unsure") else "unsure"
         result = CheckResult(status, r.get("detail") or "", [])
         result.frame = self._save(warped, status)
@@ -597,49 +681,79 @@ class Vision:
         import vlm
         return vlm.available()
 
-    def _model_step(self, mask, board_img, raw, period) -> bool:
+    def _model_step(self, mask, board_img, raw, period) -> bool | None:
         """Let the vision model judge a settled change: what was plugged in or pulled out, which holes, the
         updated part list and narration. False if it couldn't (API error): the pixel rules take over."""
         import vlm
-        if mask.mean() < MODEL_MIN_CHANGE:                  # a few stray pixels: absorb without asking
-            self.baseline, self._baseline_raw = board_img, raw
-            self._led_rebase(board_img, period, full=False)
-            return True
+        import cv2
+        if not self._force_assess and mask.mean() < MODEL_MIN_CHANGE:
+            _, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+            if len(stats) <= 1 or stats[1:, cv2.CC_STAT_AREA].max() < MODEL_MIN_BLOB:
+                # Keep the reference so a sequence of small movements can accumulate into a visible change.
+                self._led_rebase(board_img, period, full=False)
+                return True
         overlay = {"mask": mask, "ends": []}
         before = self.baseline
         self.status = "looking closely..."
         t0 = time.time()
+        version, task = self._task_version, self.task
         try:
-            v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
-                          vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts,
-                          context="\n".join(self.context),
-                          cam_before=None if self._baseline_raw is None else vlm.camera_view(self._baseline_raw, self.board),
-                          cam_after=vlm.camera_view(raw, self.board))
+            for attempt in range(2):
+                v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
+                              vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts,
+                              context=self._vision_context(), task=task,
+                              cam_before=None if self._baseline_raw is None else vlm.camera_view(self._baseline_raw, self.board),
+                              cam_after=vlm.camera_view(raw, self.board))
+                v = vlm.validate_judgement(v, self.board.rows)
+                if not self._observation_current(period, version):
+                    self.status = "board or step changed; checking the latest view"
+                    return None
+                if v["grid"] != "misaligned" or attempt:
+                    break
+                self.status = "re-aligning the hole grid"
+                recovered = self._recover_grid(raw, period)
+                if recovered is None:
+                    break
+                board_img, raw = recovered
+                before = self.baseline
+                overlay = {"mask": change_mask(before, board_img), "ends": []}
         except Exception as e:                              # never let the model break the loop
             print(f"  [vlm] failed ({e!r}); using pixel rules", flush=True)
+            if not self._observation_current(period, version):
+                return None
             return False
+        self._force_assess = False
+        if v["grid"] != "aligned":
+            # Do not store guessed hole locations or turn a calibration failure into a wiring accusation.
+            self.grid = v["grid"]
+            self.problem = "I can't reliably read the hole grid."
+            self.fix = "Keep the board still and clear your hands so I can align the grid."
+            self.severity, self.status = "warning", self.problem
+            self._publish()
+            self._emit({"kind": "assessment", "source": "model", "assessment": True,
+                        "holes": [], "rows": [], "placed": [], "removed": [], "summary": "",
+                        "observed_period": period, "task_version": version,
+                        "problem": self.problem, "fix": self.fix, "severity": self.severity, "grid": self.grid})
+            return True
         changes = [c for c in v.get("changes", []) if c.get("action") in ("placed", "removed") and c.get("holes")]
         self.baseline, self._baseline_raw = board_img, raw
         self._led_rebase(board_img, period, full=bool(changes))
         if isinstance(v.get("board"), list):
             self.parts = v["board"]
         self.narration = v.get("narration") or self.narration
-        self.problem = v.get("problem") or None
-        if not changes:
-            print(f"  [vlm] {time.time() - t0:.1f}s: nothing plugged in or pulled out", flush=True)
-            self.status = "watching the board"
-            self._publish()
-            return True
+        self.problem, self.fix, self.severity, self.grid = v["problem"], v["fix"], v["severity"], v["grid"]
         placed = sorted({h for c in changes if c["action"] == "placed" for h in c["holes"]})
         removed = sorted({h for c in changes if c["action"] == "removed" for h in c["holes"]})
-        kind = "moved" if placed and removed else "placed" if placed else "removed"
-        self.summary = v.get("summary") or f"{kind} {', '.join(placed or removed)}"
+        kind = "moved" if placed and removed else "placed" if placed else "removed" if removed else "assessment"
+        self.summary = v.get("summary") or (f"{kind} {', '.join(placed or removed)}" if changes else "")
         event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
                  "holes": placed or removed, "rows": sorted({parse_hole(h)[0] for h in placed} - {None}),
-                 "parts": changes, "summary": self.summary, "problem": v.get("problem"), "narration": self.narration,
+                 "parts": changes, "summary": self.summary, "problem": self.problem, "narration": self.narration,
+                 "fix": self.fix, "severity": self.severity, "grid": self.grid, "assessment": True,
+                 "observed_period": period, "task_version": version,
                  "source": "model", "before": before, "after": board_img, "overlay": overlay}
         self.overlay = overlay
-        self.status = self.summary
+        self.status = self.problem or self.summary or "watching the board"
         print(f"[{event['t']}] {self.summary}  ({time.time() - t0:.1f}s; placed {placed}, removed {removed})", flush=True)
         if v.get("problem"):
             print(f"  problem: {v['problem']}", flush=True)
@@ -653,7 +767,8 @@ class Vision:
         """Everything a viewer needs: parts (ui/js/board.mjs shape), LED, narration, last change."""
         return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts,
                 "led": bool(self.led.get("on")), "led_at": self.led.get("label"), "summary": self.summary,
-                "narration": self.narration, "status": self.status}
+                "narration": self.narration, "status": self.status, "problem": self.problem,
+                "fix": self.fix, "severity": self.severity, "grid": self.grid}
 
     def _publish(self) -> None:
         """Write the board state to frames/board_state.json and tell listeners (the UI server streams it)."""
@@ -752,12 +867,14 @@ class Vision:
         """Block until the next event (optionally of one kind); None on timeout."""
         deadline = None if timeout is None else time.time() + timeout
         with self._event_cv:
-            start = len(self.events)
-            while True:
-                for e in self.events[start:]:
+            start = getattr(self._event_cursor, "offset", len(self.events))
+            while not self._stop.is_set():
+                for i, e in enumerate(self.events[start:], start):
                     if kind is None or e["kind"] == kind:
+                        self._event_cursor.offset = i + 1
                         return e
                 start = len(self.events)
+                self._event_cursor.offset = start
                 remaining = None if deadline is None else deadline - time.time()
                 if remaining is not None and remaining <= 0:
                     return None
@@ -787,7 +904,7 @@ class Vision:
     def _loop(self):
         import cv2
         last_id, prev, t_prev = -1, None, time.time()
-        while True:
+        while not self._stop.is_set():
             frame_id, frame = self.camera.latest_with_id()
             if frame is None or frame_id == last_id:
                 time.sleep(0.005)
@@ -797,11 +914,17 @@ class Vision:
             warped = self.board.warp(frame)
             grey = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(warped, None, fx=0.5, fy=0.5), cv2.COLOR_BGR2GRAY), (5, 5), 0)
             motion = 1.0 if prev is None else float((cv2.absdiff(grey, prev) > MOTION_PIXEL).mean())
+            local_motion = False
+            if prev is not None and motion <= MOTION_STILL:
+                changed = (cv2.absdiff(grey, prev) > MOTION_PIXEL).astype(np.uint8)
+                _, _, stats, _ = cv2.connectedComponentsWithStats(changed)
+                local_motion = len(stats) > 1 and stats[1:, cv2.CC_STAT_AREA].max() >= MODEL_MIN_BLOB / 4
             prev = grey
             now = time.time()
             with self._lock:
                 self._raw, self._warped, self._motion = frame, warped, motion
-                if motion > MOTION_STILL:
+                self._frame_at = time.monotonic()
+                if motion > MOTION_STILL or local_motion:
                     self._still_since = now
                 self._fps = 0.9 * self._fps + 0.1 / max(now - t_prev, 1e-3)
             self._led_step(warped, still=now - self._still_since >= STILL_FOR)
@@ -880,7 +1003,8 @@ class Vision:
 
     def is_still(self) -> bool:
         with self._lock:
-            return time.time() - self._still_since >= STILL_FOR
+            return self._raw is not None and time.time() - self._still_since >= STILL_FOR \
+                and time.monotonic() - self._frame_at <= FRAME_TIMEOUT
 
     def wait_stable(self, timeout: float = 20.0):
         """Warped board once it has been still for STILL_FOR seconds, or None on timeout."""
@@ -902,8 +1026,8 @@ class Vision:
         warped = self.wait_stable()
         if warped is None:
             with self._lock:
-                warped = self._warped.copy()
-        return Snapshot(image=warped, path=self._save(warped, "before"))
+                warped = None if self._warped is None else self._warped.copy()
+        return Snapshot(image=warped, path=self._save(warped, "before") if warped is not None else "")
 
     def check_placement(self, before: Snapshot, expect_rows: list[int], wire_colour: str | None) -> CheckResult:
         self._busy = True
@@ -914,6 +1038,8 @@ class Vision:
 
     def _check(self, before: Snapshot, expect_rows: list[int], wire_colour: str | None) -> CheckResult:
         self.expect_rows = list(expect_rows)
+        if before is None or before.image is None or self.grid != "aligned":
+            return CheckResult("unsure", "I need a clear, aligned view of the board before checking that placement.")
         first = self.wait_stable()
         time.sleep(1.0)
         second = self.wait_stable()

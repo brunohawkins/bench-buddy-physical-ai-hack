@@ -10,6 +10,10 @@ import project
 RADAR_LED = {
     "id": "radar_led",
     "name": "radar presence LED",
+    "circuit": "Radar V -> + supply rail; G -> - supply rail. IO -> row 30 -> 1 kilohm resistor -> row 35 "
+               "-> LED anode; LED cathode -> row 36 -> jumper -> the same ground rail as G. All row junctions "
+               "must share the same a-e or f-j half. TX and RX remain unplugged. Use the user's identified "
+               "lead colours, not colour conventions. LED polarity and resistor value may need user confirmation.",
     "match": "a light that turns on when someone walks up: radar, presence, motion or people sensor with an LED",
     "required": [
         {"desc": "an LD2402 radar module", "type": ("other", "ic"), "keywords": ("radar", "ld2402", "hlk")},
