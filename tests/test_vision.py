@@ -197,6 +197,20 @@ def test_led_turns_on_and_off():
     assert e is not None, "LED never reported off"
 
 
+def test_bright_red_wire_is_not_an_led():
+    import time
+    from vision import Vision
+    cam = ScriptedCamera()
+    cam.scenes["bright"] = camera_image(wire_row=13, colour=(60, 60, 255), seed=12)   # glossy red cable, V=255
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+    time.sleep(3.0)
+    cam.scene = "bright"
+    e = v.wait_for_event(timeout=6)
+    assert e is not None and e["kind"] == "placed", e and e["kind"]
+    time.sleep(1.5)
+    assert not v.led["on"], v.led
+
+
 def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)

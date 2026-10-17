@@ -297,6 +297,7 @@ class Vision:
         self.led = {"on": False, "label": None, "xy": None}  # LED state, updated every frame (see _led_step)
         self._led_ref = None                      # brightness of the board with the LED off
         self._led_hits = 0                        # consecutive frames with / without a glow (debounce)
+        self._led_ok = None                       # still period the watcher has accounted for (LED judged after)
         self._event_cv = threading.Condition()
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
@@ -367,6 +368,7 @@ class Vision:
             board_img = self._aligned(raw)
             if self.baseline is None:
                 self.baseline, seen = board_img, period
+                self._led_rebase(board_img, period, full=True)
                 self._save_board()
                 self.status = "watching the board"
                 continue
@@ -396,6 +398,7 @@ class Vision:
                     print(f"[{event['t']}] {self.status}", flush=True)
                     self._emit(event)
                 self.baseline, seen = board_img, period    # cable moved / lighting drift: absorb it
+                self._led_rebase(board_img, period, full=bool(rows))
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
             period2, raw2 = self._stable_board()
@@ -424,6 +427,7 @@ class Vision:
             self.status = "wire " + " and ".join(parts)
             print(f"[{event['t']}] {self.status}", flush=True)
             self.baseline, seen = board2, period
+            self._led_rebase(board2, period, full=True)
             self._save_board()
             self._emit(event)
 
@@ -559,7 +563,7 @@ class Vision:
         if time.time() - self._led_since < LED_WARMUP:
             self._led_ref = 0.8 * self._led_ref + 0.2 * v
             return
-        if not still:
+        if not still or self._led_ok != self._still_since:     # wait until the watcher has seen this still period
             return
         glow = (v >= LED_V) & (hsv[..., 1] >= LED_S) & (v - self._led_ref >= LED_RISE) & self._led_area
         n, labels, stats, cents = cv2.connectedComponentsWithStats(glow.astype(np.uint8))
@@ -586,6 +590,17 @@ class Vision:
             self.events.append({"t": time.strftime("%H:%M:%S"), "kind": kind, "led": dict(self.led),
                                 "placed": [], "removed": [], "holes": [], "rows": []})
             self._event_cv.notify_all()
+
+    def _led_rebase(self, board_img, period, full: bool) -> None:
+        """The watcher has accounted for this still period: judge LEDs against the board as it accepted it.
+        full after a placement (a new red cable or part is not a glow); otherwise only darken the reference,
+        so an LED that lit up during the period still stands out."""
+        import cv2
+        v = cv2.cvtColor(board_img, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32)
+        ref = self._led_ref
+        if ref is not None and ref.shape == v.shape and not self.led["on"]:
+            self._led_ref = v if full else np.minimum(ref, v)
+        self._led_ok = period
 
     def _terminal_area(self, shape):
         """Where an LED can sit: the hole area plus half a pitch, not the rail stripes."""
