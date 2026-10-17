@@ -44,6 +44,7 @@ DEBUG = bool(os.environ.get("VISION_DEBUG"))   # save every evaluated before/aft
 # Tuning. Expect to adjust these on the real board.
 MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
 MOTION_STILL = 0.003     # fraction of moving pixels below which the board counts as still
+HANDS_FRAMES = 4         # frames of motion in a row before the live view says someone is working on the board
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
 DIFF_PIXEL = 35.0        # Lab distance for a pixel to count as changed
 SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
@@ -406,6 +407,11 @@ class Vision:
         self.summary = ""                        # the last change, one sentence
         self.problem = None                       # wiring problem the model saw in the last change, if any
         self.listeners: list = []                 # called with state() whenever it changes (UI server, 3D view)
+        # What is happening at the bench right now, for a live view: calibrating, hands (someone is working on
+        # the board), looking (settled; the model is judging these rows/holes), ready. See _set_activity.
+        self.activity: dict = {"phase": "calibrating"}
+        self._moving = 0                          # consecutive frames with motion (debounces "hands")
+        self._pixel_wires: list[list[str]] = []   # without the model: wire ends grouped by the event that placed them
         self.context: list[str] = []              # recent conversation at the bench, given to the model (see note)
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
@@ -481,6 +487,17 @@ class Vision:
         return self.board.warp(raw)
 
     def _watch_loop(self):
+        while True:                               # one bad frame must not stop the watcher for the rest of the run
+            try:
+                self._watch()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.status = f"vision error: {e!r}"
+                self._set_activity("ready")
+                time.sleep(0.5)
+
+    def _watch(self):
         import calibrate
         seen = None                               # still period already handled
         big = 0                                   # consecutive still periods with a big change
@@ -497,6 +514,7 @@ class Vision:
                 self._led_rebase(board_img, period, full=True)
                 self._save_board()
                 self.status = "watching the board"
+                self._set_activity("ready")
                 continue
             mask = change_mask(self.baseline, board_img)
             if DEBUG:
@@ -509,10 +527,14 @@ class Vision:
                     self.status = "re-learned the board"
                 else:
                     self.status = "something big is over the board"
+                    self._set_activity("hands")
                 continue
             big = 0
+            if mask.mean() >= MODEL_MIN_CHANGE:              # tell the live view where to look before judging it
+                self._set_activity("looking", **self._where(mask, board_img))
             if self._use_model() and self._model_step(mask, board_img, raw, period):
                 seen = period
+                self._set_activity("ready")
                 continue
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
             ends = [self._snap_removed(e) for e in ends]
@@ -529,6 +551,7 @@ class Vision:
                     self._emit(event)
                 self.baseline, self._baseline_raw, seen = board_img, raw, period    # cable moved / lighting drift: absorb it
                 self._led_rebase(board_img, period, full=bool(rows))
+                self._set_activity("ready")
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
             period2, raw2 = self._stable_board()
@@ -544,13 +567,14 @@ class Vision:
             removed = sorted({e["label"] for e in ends if e["kind"] == "removed"})
             kind = "moved" if placed and removed else "placed" if placed else "removed"
             event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "placed": placed, "removed": removed,
-                     "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed"}),
+                     "holes": placed or removed, "rows": sorted({e["row"] for e in ends if e["kind"] == "placed" and e["row"] is not None}),
                      "before": self.baseline, "after": board2, "overlay": {"mask": mask, "ends": ends}}
             for e in ends:
                 if e["kind"] == "removed":
                     self.wires.pop(e["label"], None)
                 else:
                     self.wires[e["label"]] = (e["x"], e["y"])
+            self._pixel_board(ends)
             self.overlay = event["overlay"]
             parts = ([f"placed at {', '.join(placed)}"] if placed else []) + \
                     ([f"removed from {', '.join(removed)}"] if removed else [])
@@ -560,6 +584,60 @@ class Vision:
             self._led_rebase(board2, period, full=True)
             self._save_board()
             self._emit(event)
+            self._set_activity("ready")
+
+    def _hole_of(self, end: dict) -> str | None:
+        """A wire end (plug_ends) as a hole name: "d12" stays; "top + rail" gets the row it sits by ("+top12")."""
+        from calibrate import MARGIN_ROW
+        label, x = end["label"], end["x"]
+        if not label or not label.endswith(" rail"):
+            return label
+        row = min(max(int(round((x - MARGIN_ROW) / PITCH)) + 1, 1), self.board.rows)
+        side, sign = label[:-5].split()
+        return f"{sign}{side}{row}"
+
+    def _pixel_board(self, ends: list[dict]) -> None:
+        """No vision model: keep a part list from the pixel rules alone (plain wires; ends placed together are one
+        wire), so the live view still follows the board."""
+        if self._use_model():
+            return
+        placed = [self._hole_of(e) for e in ends if e["kind"] == "placed"]
+        removed = {self._hole_of(e) for e in ends if e["kind"] == "removed"}
+        def gone(h):                              # a rail end read back a row off still counts
+            if h in removed:
+                return True
+            ph = parse_hole(h)
+            return ph[2] is not None and any(parse_hole(r)[2] == ph[2] and abs(parse_hole(r)[0] - ph[0]) <= 2
+                                             for r in removed if r)
+        wires = [[h for h in w if not gone(h)] for w in self._pixel_wires]
+        wires = [w for w in wires if w]
+        for i in range(0, len([h for h in placed if h]), 2):
+            wires.append([h for h in placed if h][i:i + 2])
+        self._pixel_wires = wires
+        self.parts = [{"id": f"wire{i + 1}", "part": "wire", "colour": None, "holes": w} for i, w in enumerate(wires)]
+        self.narration = ("The board is empty." if not wires else
+                          "Wires in " + "; ".join(" and ".join(hole_label(h) for h in w) for w in wires) + ".")
+        self.summary = self.status.capitalize()
+        self._publish()
+
+    def _where(self, mask, board_img) -> dict:
+        """Quick pixel read of a settled change, before the model has judged it: rows touched and plug holes."""
+        try:
+            ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
+            holes = sorted({e["label"] for e in ends if e["kind"] == "placed" and e["row"] is not None and e["col"]})
+            rows = sorted({e["row"] for e in ends if e["row"] is not None} | set(self._component_rows(mask)))
+        except Exception as e:
+            print(f"  [activity] {e!r}", flush=True)
+            return {}
+        return {"rows": rows, "holes": holes}
+
+    def _set_activity(self, phase: str, **extra) -> None:
+        """Change the live phase and tell listeners (only on a change, so per-frame callers are cheap)."""
+        new = {"phase": phase, "t": time.time(), **extra}
+        if phase == self.activity.get("phase") and extra == {k: v for k, v in self.activity.items() if k not in ("phase", "t")}:
+            return
+        self.activity = new
+        self._publish()
 
     def note(self, who: str, text: str) -> None:
         """Conversation context for the vision model, e.g. note("User", "the black lead is ground")."""
@@ -653,7 +731,8 @@ class Vision:
         """Everything a viewer needs: parts (ui/js/board.mjs shape), LED, narration, last change."""
         return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts,
                 "led": bool(self.led.get("on")), "led_at": self.led.get("label"), "summary": self.summary,
-                "narration": self.narration, "status": self.status}
+                "narration": self.narration, "status": self.status, "problem": self.problem,
+                "activity": {k: v for k, v in self.activity.items() if k != "t"}}
 
     def _publish(self) -> None:
         """Write the board state to frames/board_state.json and tell listeners (the UI server streams it)."""
@@ -805,6 +884,9 @@ class Vision:
                     self._still_since = now
                 self._fps = 0.9 * self._fps + 0.1 / max(now - t_prev, 1e-3)
             self._led_step(warped, still=now - self._still_since >= STILL_FOR)
+            self._moving = self._moving + 1 if motion > MOTION_STILL else 0
+            if self._moving == HANDS_FRAMES and self.activity["phase"] in ("ready", "looking"):
+                self._set_activity("hands")
             t_prev = now
 
     def _led_step(self, warped, still: bool) -> None:
@@ -967,23 +1049,6 @@ class Vision:
         cv2.destroyAllWindows()
 
 
-# What --fake "sees" for the radar demo (curated.RADAR_LED), in vlm.py's board shape, so the UI's 3D view
-# plays the build: each look-check adds its step's parts. The LED first lands a row off (36/37) to show
-# the twin and the tutor catching it.
-FAKE_RADAR_BUILD = [
-    ("power", "The red lead went into the top + rail and the black lead into the top - rail.",
-     [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["+top26"]},
-      {"id": "wire2", "part": "wire", "colour": "black", "holes": ["-top27"]}]),
-    ("io", "The yellow lead is in a30 and a resistor runs from b30 to b35.",
-     [{"id": "wire3", "part": "wire", "colour": "yellow", "holes": ["a30"]},
-      {"id": "r1", "part": "resistor", "colour": None, "holes": ["b30", "b35"]}]),
-    ("led", "The LED's legs are in c35 and c36.",
-     [{"id": "led", "part": "led", "colour": "red", "holes": ["c35", "c36"]}]),
-    ("ground", "A black jumper joins a36 to the top - rail.",
-     [{"id": "wire4", "part": "wire", "colour": "black", "holes": ["a36", "-top38"]}]),
-]
-
-
 class FakeVision:
     """Fails the first check one row off, then passes, to exercise the retry path."""
 
@@ -1003,61 +1068,6 @@ class FakeVision:
     def wait_for_placement(self, expect_rows: list[int], wire_colour: str | None = None,
                            timeout: float | None = 120) -> CheckResult | None:
         return self.check_placement(Snapshot(image=None), expect_rows, wire_colour)
-
-
-class ScriptedFakeVision(FakeVision):
-    """FakeVision for main.py --fake: the tutor's look-checks play FAKE_RADAR_BUILD, and each change is published
-    like Vision.state() to listeners, so the UI's 3D view follows a whole radar build with no camera."""
-
-    def __init__(self):
-        super().__init__()
-        self.looks = 0
-        self.led_wrong_shown = False
-        self.parts: list[dict] = []
-        self.led = False
-        self.summary = ""
-        self.listeners: list = []
-
-    def state(self) -> dict:
-        narration = ("The board is empty." if not self.parts else
-                     "On the board: " + "; ".join(f"{p['colour'] + ' ' if p.get('colour') else ''}{p['part']} in "
-                                                   f"{', '.join(hole_label(h) for h in p['holes'])}" for p in self.parts) + ".")
-        return {"t": time.strftime("%H:%M:%S"), "parts": ui_parts(self.parts), "board": self.parts, "led": self.led,
-                "led_at": "c35" if self.led else None, "summary": self.summary, "narration": narration, "status": "fake"}
-
-    def _publish(self) -> None:
-        for fn in list(self.listeners):
-            try:
-                fn(self.state())
-            except Exception as e:
-                print(f"[vision] listener failed: {e!r}", flush=True)
-
-    def verify(self, question: str) -> CheckResult:
-        if self.looks >= len(FAKE_RADAR_BUILD):
-            return CheckResult("pass", "Looks right.", [])
-        step, said, parts = FAKE_RADAR_BUILD[self.looks]
-        if step == "led" and not self.led_wrong_shown:
-            self.led_wrong_shown = True
-            self.parts = [*self.parts, {**parts[0], "holes": ["c36", "c37"]}]
-            self.summary = "The LED went into c36 and c37."
-            self._publish()
-            return CheckResult("fail", "The LED's legs are in rows 36 and 37; they should be in 35 and 36.", [36, 37])
-        ids = {p["id"] for p in parts}
-        self.parts = [p for p in self.parts if p["id"] not in ids] + parts
-        self.summary = said
-        self.looks += 1
-        self._publish()
-        return CheckResult("pass", said + " Looks good.", [])
-
-    def note(self, who: str, text: str) -> None:
-        """The tutor's conversation. When it asks the user to walk up to the radar, the LED lights a moment later."""
-        import curated
-        finish = next(s["say"] for s in curated.RADAR_LED["steps"] if s["id"] == "finish")
-        if who == "Bench Buddy" and text.strip() == finish and self.looks >= len(FAKE_RADAR_BUILD):
-            def light():
-                self.led, self.summary = True, "The LED lit up."
-                self._publish()
-            threading.Timer(2.0, light).start()
 
 
 if __name__ == "__main__":

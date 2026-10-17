@@ -151,6 +151,6 @@ Goal: the vision model notices what is WRONG as soon as it happens and Bench Bud
 
 ## Also before the deadline
 
-- Parthiv: render `/api/board` `parts` in `board.mjs` (live 3D view) and make the presentation.
+- Parthiv: live 3D view done (`ui/README.md`, "3D twin"); make the presentation.
 - Record the ~1 min demo video: radar build guided by voice, vision catching a mistake, walk past, LED lights.
 - Make the repo public, then submit (team name, members, description, repo, video, tech: OpenCV, OpenAI gpt-6-astra vision + gpt-4o-mini-transcribe, ElevenLabs Flash TTS, Python stdlib web UI).

@@ -12,6 +12,7 @@ import { PROJECTS, layoutOf, shiftRows } from "./projects.js";
 
 const WIRE_COLOURS = [["wireRed", "red"], ["wireBlack", "black"], ["wireYellow", "yellow"], ["wireGreen", "green"], ["wireBlue", "blue"], ["wireOrange", "orange"]];
 const TABLE = -0.6;            // the bench surface, in the breadboard model's frame (its foam backing sits on it)
+const DROP = 22;               // mm a newly seen part falls from as it appears
 
 // boardId picks the breadboard model ("breadboard-half", or "breadboard-full" for the real 63-row board);
 // panelHost is where the simulation panel goes (default: after the gallery's .bar).
@@ -223,7 +224,10 @@ export function createBoard({ THREE, scene, camera, controls, canvas, CATALOG, d
     const e = CATALOG.find((c) => c.id === p.id);
     if (p.id === "jumper-wire") {
       const c = Math.max(0, WIRE_COLOURS.findIndex(([, n]) => n === (p.colour ?? "red")));
-      return addWire(terminal(p.pins["end A"]), terminal(p.pins["end B"]), c, { title: p.title, ...extra });
+      const b = terminal(p.pins["end B"]);
+      // Only one end seen in the board: the other hangs loose off the nearest edge (its own floating net).
+      const a = p.pins["end A"] ? terminal(p.pins["end A"]) : { x: b.x, y: b.y + (b.y < 0 ? -16 : 16), z: 9, name: `loose ${p.pins["end B"]}` };
+      return addWire(a, b, c, { title: p.title, ...extra });
     }
     let { rot: r = null, span: s = null } = p;
     if (r === null && s === null && Object.keys(p.pins).length === 2) ({ rot: r, span: s } = fitTwoPin(e, p.pins) ?? { rot: 0, span: s });
@@ -382,6 +386,8 @@ export function createBoard({ THREE, scene, camera, controls, canvas, CATALOG, d
     // board, then every part. Rebuilt from scratch each time; the camera is framed only when asked.
     //   { board?, devices: [{ id, name, at: [x, y], rot }], parts: [layout parts], inputs: { usb, presence … } }
     showLayout(next, { reframe = false } = {}) {
+      const keyOf = (p) => `${p.id}|${p.title}|${p.pins.map((q) => q.hole).join(",")}`;
+      const before = new Set(placed.map(keyOf));
       project = null;
       quiet = true;
       useBoard(next.board ?? bb?.id ?? boardId);
@@ -393,6 +399,11 @@ export function createBoard({ THREE, scene, camera, controls, canvas, CATALOG, d
       for (const [k, v] of Object.entries(next.inputs ?? {})) twin.set(k, v);
       quiet = false;
       sync();
+      // Parts that weren't there a moment ago drop into the board, so a change on the bench reads as one.
+      for (const item of placed) if (!before.has(keyOf(item)) && !item.device) {
+        item.drop = { t: 0, y: item.root.position.y };
+        item.root.position.y += DROP;
+      }
       if (reframe) {                                   // on the breadboard itself (the laptop prop is far off)
         const box = new THREE.Box3().setFromObject(bb.root).expandByVector(new THREE.Vector3(6, 12, 18));
         const { home, centre } = frame(box);
@@ -521,6 +532,13 @@ export function createBoard({ THREE, scene, camera, controls, canvas, CATALOG, d
 
   api.tick = (dt) => {
     if (!api.active || !twin) return;
+    for (const item of placed) if (item.drop) {
+      item.drop.t = Math.min(1, item.drop.t + dt * 2.8);
+      const u = 1 - item.drop.t;
+      item.root.position.y = item.drop.y + DROP * u * u * u;
+      if (item.drop.t >= 1) item.drop = null;
+    }
+    if (marks) marks.material.opacity = 0.45 + 0.4 * (0.5 + 0.5 * Math.sin(performance.now() / (markPulse ? 160 : 420)));
     const r = twin.step(Math.min(dt, 0.05));
     placed.forEach((item, i) => {
       const rep = r.parts[i];
@@ -559,6 +577,41 @@ export function createBoard({ THREE, scene, camera, controls, canvas, CATALOG, d
   Object.defineProperty(api, "twin", { get: () => twin });
   // A message from the live follower (diagnosis, blink-rate comparison), shown above the parts.
   api.note = (html) => { const n = panel?.querySelector(".sim-note"); if (!n) return; n.innerHTML = html; n.hidden = !html; };
+  // Live highlights on the board (InstancedMesh discs): rows vision is looking at right now, the holes it
+  // read, and where the current step wants things to go.
+  //   mark({ look: { rows, holes }, target: { rows, rails } })   (pass {} to clear)
+  let marks = null, markPulse = false;
+  api.mark = ({ look = null, target = null } = {}) => {
+    if (!bb) return;
+    if (!marks) {
+      marks = new THREE.InstancedMesh(new THREE.CircleGeometry(1.05, 20), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false }), 1400);
+      marks.rotation.x = -Math.PI / 2;
+      marks.count = 0;
+      marks.renderOrder = 2;
+      group.add(marks);
+    }
+    const spots = [];
+    const lettered = (row) => "abcdefghij".split("").map((c) => `${c}${row}`);
+    for (const r of target?.rows ?? []) for (const n of lettered(r)) spots.push([n, 0x3ccf72]);
+    for (const sign of target?.rails ?? []) for (const h of bb.holes) if (h.name.includes(` ${sign} rail`)) spots.push([h.name, 0x3ccf72]);
+    for (const r of look?.rows ?? []) for (const n of lettered(r)) spots.push([n, 0xf4b73a]);
+    for (const n of look?.holes ?? []) spots.push([n, 0xffffff]);
+    const m = new THREE.Matrix4(), col = new THREE.Color();
+    let i = 0;
+    for (const [name, hex] of spots) {
+      const h = bb.holes.find((x) => x.name === name);
+      if (!h || i >= 1400) continue;
+      m.makeTranslation(h.x, h.y, bb.top + 0.06);
+      marks.setMatrixAt(i, m);
+      marks.setColorAt(i, col.setHex(hex));
+      i++;
+    }
+    marks.count = i;
+    marks.instanceMatrix.needsUpdate = true;
+    if (marks.instanceColor) marks.instanceColor.needsUpdate = true;
+    markPulse = !!look;
+  };
+
   // The part a diagnosis blames pulses red until the bench measures healthy again.
   let suspectText = null;
   api.suspect = (text) => { suspectText = text; };

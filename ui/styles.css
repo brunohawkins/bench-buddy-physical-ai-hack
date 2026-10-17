@@ -247,6 +247,12 @@ body:has(#bench:not([hidden])) .mat-marks :is(.minor,.deg){display:none}
 .sim-chip i{width:7px;height:7px;border-radius:50%;background:#56605a}
 .sim-chip.on i{background:#ff5a3c;box-shadow:0 0 0 3px rgba(255,90,60,.25),0 0 10px #ff5a3c}
 .sim-chip.bad{background:rgba(216,71,61,.9);color:#fff;box-shadow:none}
+.sim-chip.busy i{background:var(--accent);animation:chipPulse .9s ease-in-out infinite}
+.sim-chip.target i{background:#3ccf72;box-shadow:0 0 0 3px rgba(60,207,114,.25)}
+@keyframes chipPulse{50%{opacity:.35;transform:scale(.7)}}
+.narration.bad{background:rgba(216,71,61,.85);box-shadow:none;color:#fff}
+.twin-off{position:absolute;inset:auto 0 50% 0;text-align:center;color:var(--mat-ink);font:var(--t-small)}
+.card pre{margin:8px 0 0;padding:8px 10px;border-radius:8px;background:var(--paper-2);font:500 13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
 .sim-chip.bad i{background:#fff}
 .narration{position:absolute;z-index:2;top:102px;right:20px;max-width:min(360px,40%);margin:0;padding:9px 12px;border-radius:12px;font:var(--t-small);color:#e9f5ee;
   background:rgba(16,30,23,.55);box-shadow:inset 0 0 0 1px rgba(214,240,224,.16);backdrop-filter:blur(6px)}

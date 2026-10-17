@@ -19,8 +19,8 @@ MODULES = ("vision", "voice", "brain", "bench")
 
 def build(fake: set[str], args):
     if "vision" in fake:
-        from vision import ScriptedFakeVision      # plays the radar build so the UI's 3D view has something to show
-        vision = ScriptedFakeVision()
+        from vision import FakeVision
+        vision = FakeVision()
     else:
         from camera import Camera, default_source
         from vision import Vision

@@ -1,64 +1,22 @@
-// Bench Buddy front end. Everything is driven by fsm.py log lines: from ui_server.py (live)
-// or from the in-browser demo (demo.mjs), so both modes share one code path.
-import { createBoard, PARTS, partById } from "./board.mjs";
+// Bench Buddy front end. Driven by ui_server.py: tutor log lines (said, heard, plan, step checks) and vision's
+// live board state, which the 3D twin in the board pane draws and simulates as the board is built.
 import { drawMat } from "./mat.mjs";
-import { createDemo, DEMO_PROJECT } from "./demo.mjs";
 import { createHero } from "./hero.mjs";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-const ALL = PARTS.map((p) => p.id);
 const STATE_LABEL = { IDLE: "Hello", INVENTORY: "Your parts", PROPOSE: "The plan", STEP: "Build", CHECK: "Checking", MEASURE: "Measuring", DONE: "Working", DEBUG: "Debugging" };
-const SUGGEST = {
-  INVENTORY: ["I've got a 555, two 10k resistors, a 68k, a 330 ohm, a 10 microfarad cap, a 100 nanofarad and a 10 nanofarad cap, and an LED"],
-  PROPOSE: ["Ready"], STEP: ["Done"], DONE: ["It's not working", "Why 0.99 Hz?"], DEBUG: ["Done"],
-};
+const SUGGEST = { PROPOSE: ["Ready"], STEP: ["Done"], DONE: ["It's not working"], DEBUG: ["Done"] };
 
 drawMat($("matMarks"));
 createHero({ stage: $("heroStage"), boardEl: $("heroBoard"), chute: $("chute"), landing: $("landing") });
 
 // ---------------------------------------------------------------- session state
 const ui = {
-  started: false, transport: null, mode: "demo", project: DEMO_PROJECT, stepI: 0,
+  started: false, transport: null, steps: [], stepI: -1,
   fsm: "IDLE", muted: false, browserTts: true, serverStt: false, camera: false,
   lastLocal: "", waiting: false, thinking: false,
 };
-const prebuilt = () => ALL.filter((id) => !ui.project.steps.some((s) => s.id === id));
-let board;
-
-// ---------------------------------------------------------------- 3D twin (figures/parts → vendor/twin.bundle.mjs)
-// The board pane shows the breadboard twin: vision's live part list drawn in 3D and simulated. The 2D board
-// stays underneath as the fallback (no WebGL) and keeps the old 555 handlers harmless.
-let twin = null;
-const twinQueue = [];                       // events that arrive before the twin has loaded
-function mountTwin() {
-  if (twin || !("WebGLRenderingContext" in window)) return;
-  twin = "loading";
-  import("../vendor/twin.bundle.mjs").then(({ mountTwin }) => {
-    twin = mountTwin($("twin"), { onStatus: simStatus });
-    $("twin").hidden = false;
-    $("board").hidden = true;
-    if (ui.twinDemo) twin.followScript("blinker-555");
-    for (const ev of twinQueue.splice(0)) toTwin(ev);
-  }).catch((err) => { console.warn("3D twin unavailable, using the 2D board", err); twin = null; });
-}
-function toTwin(ev) {
-  if (!twin || twin === "loading") return twinQueue.push(ev);
-  if (ev.type === "board") twin.applyVision(ev);
-  if (ev.type === "log") twin.applyLog(ev.line);
-}
-function simStatus({ simLit, realLit, agree }) {
-  $("simChip").hidden = simLit === null;
-  $("simChip").className = `sim-chip ${agree ? (simLit ? "on" : "") : "bad"}`;
-  $("simText").textContent = agree
-    ? `Simulation · LED ${simLit ? "on" : "off"}${realLit === null ? "" : " · matches the camera"}`
-    : `Simulation says LED ${simLit ? "on" : "off"}, camera sees it ${realLit ? "on" : "off"}`;
-}
-function narrate(ev) {
-  const text = ev.narration || ev.summary;
-  $("narration").hidden = !text;
-  $("narration").textContent = text || "";
-}
 
 // ---------------------------------------------------------------- landing → bench
 $("start").addEventListener("click", enterBench);
@@ -74,52 +32,90 @@ function enterBench() {
     $("landing").hidden = true;
     $("bench").hidden = false;
     $("bench").classList.add("entering");
-    if (!board) {
-      board = createBoard($("board"));
-      board.reveal(prebuilt());
-      $("board").addEventListener("part-hover", (e) => focusPart(e.detail));
-    }
     mountTwin();
     if (!ui.started) connect();
   }, 380);
 }
 
+// ---------------------------------------------------------------- 3D twin (figures/parts → vendor/twin.bundle.mjs)
+// The board pane is the breadboard twin: vision's live part list drawn in 3D and simulated, with the rows vision
+// is looking at and the open step's target highlighted.
+let twin = null;
+const twinQueue = [];                       // events that arrive before the twin has loaded
+function mountTwin() {
+  if (twin) return;
+  twin = "loading";
+  import("../vendor/twin.bundle.mjs").then(({ mountTwin }) => {
+    twin = mountTwin($("twin"), { onStatus: simStatus });
+    for (const ev of twinQueue.splice(0)) toTwin(ev);
+  }).catch((err) => {
+    console.warn("3D view unavailable", err);
+    twin = null;
+    $("twin").innerHTML = `<p class="twin-off">The 3D board needs WebGL, which this browser doesn't have. The chat still works.</p>`;
+  });
+}
+function toTwin(ev) {
+  if (!twin || twin === "loading") return twinQueue.push(ev);
+  if (ev.type === "board") twin.applyVision(ev);
+  if (ev.type === "log") twin.applyLog(ev.line);
+}
+const span = (rows) => (rows.length > 1 ? `rows ${rows[0]}–${rows.at(-1)}` : `row ${rows[0]}`);
+function simStatus({ phase, rows, target, simLit, realLit, agree }) {
+  let text, tone = "";
+  if (phase === "none") text = ui.camera ? "Waiting for the camera…" : "No camera connected";
+  else if (phase === "calibrating") text = "Finding the board · keep hands off";
+  else if (phase === "hands") (text = "Hands on the board…"), (tone = "busy");
+  else if (phase === "looking") (text = rows.length ? `Looking at ${span(rows)}…` : "Looking at the change…"), (tone = "busy");
+  else if (!agree) (text = `Simulation says LED ${simLit ? "on" : "off"}, camera sees it ${realLit ? "on" : "off"}`), (tone = "bad");
+  else if (simLit !== null) (text = `Simulation · LED ${simLit ? "on" : "off"}${realLit === null ? "" : " · matches the camera"}`), (tone = simLit ? "on" : "");
+  else if (target && (target.rows.length || target.rails.length))
+    text = `Next: ${[target.rows.length ? span(target.rows) : "", ...target.rails.map((r) => `the ${r === "+" ? "plus" : "minus"} rail`)].filter(Boolean).join(" and ")}`, tone = "target";
+  else text = "Watching the board";
+  $("simChip").hidden = false;
+  $("simChip").className = `sim-chip ${tone}`;
+  $("simText").textContent = text;
+}
+function narrate(ev) {
+  const text = ev.problem ? `${ev.problem}` : ev.narration || ev.summary;
+  $("narration").hidden = !text;
+  $("narration").classList.toggle("bad", !!ev.problem);
+  $("narration").textContent = text || "";
+}
+
 // ---------------------------------------------------------------- transport
+async function hello() {
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 1500);
+    const res = await fetch("/api/hello", { signal: ctrl.signal });
+    return res.ok ? await res.json() : null;
+  } catch { return null; }
+}
 async function connect() {
   ui.started = true;
-  const params = new URLSearchParams(location.search);
-  let hello = null;
-  if (!params.has("demo")) {
-    try {
-      const ctrl = new AbortController();
-      setTimeout(() => ctrl.abort(), 1200);
-      const res = await fetch("/api/hello", { signal: ctrl.signal });
-      if (res.ok) hello = await res.json();
-    } catch { /* no server: demo */ }
+  const h = await hello();
+  if (!h) {
+    // Nothing to show without the bench: say how to start it, and keep checking.
+    setConn("down", "Offline");
+    $("conn").title = "Start the bench: python main.py --ui";
+    if (!$("log").querySelector(".offline")) {
+      card(`<div class="card-h">Bench Buddy isn't running</div><div>Start it on the laptop at the bench, then this page connects by itself:</div><pre>python main.py --ui</pre>`).classList.add("offline");
+    }
+    setStatus("Waiting for the bench…");
+    return setTimeout(connect, 3000);
   }
-  if (hello) {
-    ui.mode = "live";
-    applyHello(hello);
-    const es = new EventSource("/events");
-    es.onmessage = (m) => handle(JSON.parse(m.data));
-    es.onerror = () => setConn("down", "Reconnecting…");
-    es.onopen = () => setConn("live", "Live");
-    ui.transport = {
-      send: (text) => post({ text }),
-      ptt: (action) => post({ ptt: action }),
-    };
-    // Seed the twin with what vision sees right now (the SSE "board" event only comes on a change).
-    fetch("/api/board").then((r) => (r.ok ? r.json() : null)).then((st) => st?.board && handle({ type: "board", ...st })).catch(() => {});
-  } else {
-    ui.mode = "demo";
-    setConn("demo", "Demo");
-    $("conn").title = "No ui_server.py found, so this is the built-in demo. Run: python main.py --fake --ui";
-    // The demo plays the 555 script, so the twin follows that project's steps (live.js).
-    if (twin && twin !== "loading") twin.followScript("blinker-555"); else ui.twinDemo = true;
-    const demo = createDemo(handle);
-    ui.transport = { send: (text) => demo.send(text) };
-    demo.start();
-  }
+  $("log").querySelector(".offline")?.remove();
+  applyHello(h);
+  const es = new EventSource("/events");
+  es.onmessage = (m) => handle(JSON.parse(m.data));
+  es.onerror = () => setConn("down", "Reconnecting…");
+  es.onopen = () => setConn("live", "Live");
+  ui.transport = {
+    send: (text) => post({ text }),
+    ptt: (action) => post({ ptt: action }),
+  };
+  // Seed the twin with what vision sees right now (the SSE "board" event only comes on a change).
+  fetch("/api/board").then((r) => (r.ok ? r.json() : null)).then((st) => st?.board && handle({ type: "board", ...st })).catch(() => {});
 }
 const post = (body) => fetch("/api/input", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => toast("Couldn't reach the server."));
 
@@ -129,12 +125,10 @@ function setConn(kind, label) {
 }
 
 function applyHello(h) {
-  if (h.project) ui.project = { ...DEMO_PROJECT, ...h.project };
   ui.browserTts = !!h.browser_tts;
   ui.serverStt = !!h.server_stt;
   ui.camera = !!h.camera;
-  if (board) board.reveal(prebuilt());
-  $("readout").textContent = `predicted ${ui.project.predicted.toFixed(2)} Hz · measured —`;
+  $("camBtn").hidden = !ui.camera;
 }
 
 // ---------------------------------------------------------------- events
@@ -142,7 +136,7 @@ function handle(ev) {
   if (ev.type === "hello") { applyHello(ev); return; }
   if (ev.type === "status") return status(ev);
   if (ev.type === "board") {
-    if (!Array.isArray(ev.board)) return boardEvent(ev);   // the 2D demo's pulled/restored
+    if (!Array.isArray(ev.board)) return;
     narrate(ev);
     return toTwin(ev);
   }
@@ -153,9 +147,7 @@ function handle(ev) {
 // The server replays its history to a fresh page, so start from a clean slate first.
 function resetSession() {
   $("log").innerHTML = "";
-  Object.assign(ui, { stepI: 0, fsm: "", pulledId: null, lastLocal: "", thinking: false });
-  board.set({ overrides: {}, wrong: [], targets: [], tags: [], ghost: null, led: false, focus: null });
-  board.reveal(prebuilt());
+  Object.assign(ui, { steps: [], stepI: -1, fsm: "", lastLocal: "", thinking: false });
   setFsm("IDLE");
 }
 
@@ -171,116 +163,42 @@ function status(ev) {
 function onLog(l, replay) {
   const next = l.transition || l.state;
   if (next && next !== ui.fsm) setFsm(next);
+  if (Array.isArray(l.plan)) ui.steps = l.plan;
 
   if (l.heard !== undefined) {
     if (l.heard === ui.lastLocal) ui.lastLocal = "";
     else addMsg("you", l.heard, "voice");
   }
   if (l.parts) partsCard(l.parts, l.missing || []);
-  if (l.check === "vision") visionResult(l);
-  if (l.check === "measure") measureResult(l);
-  if (l.check === "probe") probeResult(l);
-  if (l.said) return said(l.said, replay);
+  if (l.step && ["vision", "look", "measure"].includes(l.check)) checkCard(l);
+  if (l.check === "measure" && !l.step) measureResult(l);
+  if (l.check === "probe") probeCard(l);
+  if (l.said) {
+    const i = ui.steps.findIndex((s) => s.say === l.said);
+    if (i >= 0) ui.stepI = i;
+    return said(l.said, replay);
+  }
 }
 
 function said(text, replay) {
   thinking(false);
   addMsg("bot", text);
   setInstruction(text);
-  if (!replay && (ui.mode === "demo" || ui.browserTts)) return speak(text);
+  if (!replay && ui.browserTts) return speak(text);
 }
 
-// ---------------------------------------------------------------- state + board
 function setFsm(s) {
-  const prev = ui.fsm;
   ui.fsm = s;
   const labels = { CHECK: "Looking at your board…", MEASURE: "Measuring…", DEBUG: "Finding the fault…" };
   if (labels[s]) setStatus(labels[s]);
   suggest(SUGGEST[s] || []);
-  if (s === "STEP" && prev !== "CHECK") showStep();
   if (s === "CHECK") thinking(true);
-}
-
-function currentStep() { return ui.project.steps[ui.stepI]; }
-
-function showStep() {
-  const step = currentStep();
-  if (!step || !partById(step.id)) return;
-  const st = board.get();
-  if (st.placed.includes(step.id)) return;
-  const p = partById(step.id);
-  board.set({ ghost: step.id, targets: [p.from, p.to], wrong: [], tags: [{ part: step.id, title: `Place · ${p.label}`, text: `${p.from[0]}${p.from[1]} → ${railName(p.to)}`, tone: "target" }] });
-}
-const RAIL = { "+L": "5 V rail", "+R": "5 V rail", "-L": "GND rail", "-R": "GND rail" };
-const railName = ([c, r]) => RAIL[c] || `${c}${r}`;
-
-function visionResult(l) {
-  const id = l.step;
-  const p = partById(id);
-  const row = (l.rows_found && l.rows_found[0]) || +(l.detail.match(/row (\d+)/i) || [])[1];
-  checkCard(l);
-  if (!p) return;
-  const st = board.get();
-  const placed = [...new Set([...st.placed, id])];
-  if (l.result === "pass") {
-    const overrides = { ...st.overrides }; delete overrides[id];
-    board.set({ placed, ghost: null, targets: [], wrong: [], overrides, tags: [{ part: id, title: "Looks good", text: `${p.label} · row ${p.from[1]}`, tone: "ok" }] });
-    ui.stepI++;
-    setTimeout(() => board.get().tags[0]?.tone === "ok" && board.set({ tags: [] }), 3500);
-    setInstruction(l.detail, "ok");
-  } else if (l.result === "fail" && row) {
-    const spot = [p.from[0], row];
-    board.set({ placed, ghost: null, targets: [p.from], wrong: [spot], overrides: { ...st.overrides, [id]: { from: spot } },
-      tags: [{ at: spot, title: `Row ${row}`, text: `Should be row ${p.from[1]}`, tone: "bad" }] });
-    setInstruction(l.detail, "bad");
-  } else {
-    board.set({ tags: [{ part: id, title: "Can't see it", text: "Move your hand out of the way", tone: "bad" }] });
-    setInstruction(l.detail, "bad");
-  }
 }
 
 function measureResult(l) {
   const m = l.detail.match(/predicted ([\d.]+).*measured ([\d.]+)/i);
-  const ok = l.result === "pass";
-  if (m && !l.step) {
-    const [pred, meas] = [+m[1], +m[2]];
-    measureCard(pred, meas, ok);
-    $("readout").textContent = `predicted ${pred.toFixed(2)} Hz · measured ${meas.toFixed(2)} Hz`;
-    const led = partById("led");
-    board.set({ led: ok && meas > 0, hz: meas || 1, tags: ok ? [{ part: "led", title: "Blinking", text: `${meas.toFixed(2)} Hz`, tone: "ok" }] : [] });
-  } else {
-    checkCard({ ...l, check: "measure" });
-    if (l.step && ok) ui.stepI++;
-  }
-}
-
-function probeResult(l) {
-  probeCard(l);
-  if (l.result === "fail" && /reset|pin 4/i.test(l.node || "")) pulled("reset");
-  if (l.result === "pass" && ui.pulledId) boardEvent({ restored: ui.pulledId });
-}
-
-function boardEvent(ev) {
-  if (ev.pulled) pulled(ev.pulled, true);
-  if (ev.restored) {
-    ui.pulledId = null;
-    const st = board.get();
-    board.set({ placed: [...new Set([...st.placed, ev.restored])], ghost: null, targets: [], wrong: [], tags: [] });
-  }
-}
-
-function pulled(id, quiet) {
-  ui.pulledId = id;
-  const p = partById(id);
-  const st = board.get();
-  board.set({ placed: st.placed.filter((x) => x !== id), ghost: id, led: false, targets: [p.from, p.to], wrong: [],
-    tags: quiet ? [] : [{ part: id, title: `Missing · ${p.label}`, text: p.detail, tone: "bad" }] });
-  $("readout").textContent = `predicted ${ui.project.predicted.toFixed(2)} Hz · measured 0.00 Hz`;
-}
-
-function focusPart(id) {
-  if (board.get().focus === id) return;
-  board.set({ focus: id });
+  if (m) measureCard(+m[1], +m[2], l.result === "pass");
+  else checkCard({ ...l, check: "measure" });
 }
 
 // ---------------------------------------------------------------- panel rendering
@@ -336,9 +254,8 @@ function probeCard(l) {
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 function setInstruction(text, tone) {
-  const step = currentStep();
   let label = STATE_LABEL[ui.fsm] || "Bench Buddy";
-  if (ui.fsm === "STEP" && step) label = `Step ${ui.stepI + 1} of ${ui.project.steps.length}${partById(step.id) ? ` · ${partById(step.id).label}` : ""}`;
+  if (ui.fsm === "STEP" && ui.stepI >= 0) label = `Step ${ui.stepI + 1} of ${ui.steps.length}`;
   $("insLabel").textContent = label;
   $("insText").textContent = text.replace(/ Say done when it's in\.$/, "");
   $("instruction").className = `instruction ${tone || (ui.fsm === "DONE" ? "ok" : ui.fsm === "DEBUG" ? "bad" : "")}`;
@@ -429,7 +346,7 @@ const typing = (e) => /TEXTAREA|INPUT|SELECT/.test(e.target.tagName);
 addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttDown(); } });
 addEventListener("keyup", (e) => { if (e.code === "Space" && !typing(e) && !$("bench").hidden) { e.preventDefault(); pttUp(); } });
 
-// ---------------------------------------------------------------- voice out (demo, or when the server asks the browser to speak)
+// ---------------------------------------------------------------- voice out (when the server asks the browser to speak)
 let voice = null;
 const pickVoice = () => {
   const vs = speechSynthesis.getVoices();
@@ -503,7 +420,7 @@ $("camBtn").addEventListener("click", async () => {
   $("camBtn").setAttribute("aria-pressed", on);
   $("cam").hidden = !on;
   if (!on) { stream?.getTracks().forEach((t) => t.stop()); stream = null; $("camImg").removeAttribute("src"); return; }
-  if (ui.mode === "live" && ui.camera) {
+  if (ui.camera) {
     // Vision owns the phone camera in Python; show its frames (with the hole grid) instead of opening it twice.
     $("camSelect").hidden = true; $("camVideo").hidden = true; $("camImg").hidden = false;
     $("camImg").src = "/camera.mjpg";

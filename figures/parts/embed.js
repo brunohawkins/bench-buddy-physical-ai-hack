@@ -2,18 +2,18 @@
 //
 //   const twin = mountTwin(el, { onStatus })
 //   twin.applyVision(state)   vision.state() / the SSE "board" event: redraw what is on the real board, re-simulate
-//   twin.applyLog(line)       tutor log lines: the usb step powers the rails, "red is V …" names the radar leads
+//   twin.applyLog(line)       tutor log lines: each step's instruction highlights where it goes; a radar or a
+//                             resistor value mentioned shapes the layout; "red is V …" names the radar leads; a
+//                             passed power step powers the rails
 //   twin.setPresence(on)      someone in front of the radar (the sim's IO goes high)
-//   twin.followScript(id)     follow a scripted project's log lines instead (the UI's 555 demo): live.js
 //
-// onStatus({ simLit, realLit, agree, unplaced, parts }) runs whenever the simulated LED or vision's LED changes,
-// so the UI can say when the bench and the simulation disagree.
+// onStatus({ phase, rows, target, simLit, realLit, agree, unplaced }) runs whenever any of that changes: vision's
+// live phase (calibrating, hands, looking, ready), the open step's target, and the simulated vs the real LED.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CATALOG } from "./catalog.js";
 import { createBoard } from "./board.js";
-import { fromVision, leadsFrom, LIVE_BOARD } from "./from-vision.js";
-import { follow } from "./live.js";
+import { fromVision, leadsFrom, targetsFrom, twinHole, LIVE_BOARD } from "./from-vision.js";
 
 export function mountTwin(el, { onStatus = () => {} } = {}) {
   el.classList.add("twin");
@@ -94,23 +94,29 @@ export function mountTwin(el, { onStatus = () => {} } = {}) {
 
   const board = createBoard({ THREE, scene, camera, controls, canvas, CATALOG, decorate, frame: frameOn, readout, legend, hold: () => {}, boardId: LIVE_BOARD, panelHost: simHost });
   board.open(null);
-  board.twin.set("usb", false);                      // the rails are dead until the tutor's usb step
+  board.twin.set("usb", false);                      // the rails are dead until a power step passes (or the LED lights)
   canvas.addEventListener("pointermove", (e) => { if (!e.buttons) board.pointer(e); });   // hover a hole: its voltage and net
 
   // Live state: what vision last saw, plus what the conversation told us.
-  const live = { vision: null, usb: false, presence: false, leads: {}, framed: false, unplaced: [] };
-  let last = { simLit: null, realLit: null };
-  let script = null;                                 // live.js follower when replaying a scripted project
+  const live = { vision: null, sig: "", usb: false, presence: false, leads: {}, radar: false, ohms: 1000,
+    framed: false, unplaced: [], activity: { phase: "none" }, steps: [], target: null };   // "none": no vision state yet
+  let last = "";
 
   // The sim panel's buttons (USB, presence) change the twin directly; keep them across redraws.
   const pull = () => { if (board.twin) { live.usb = !!board.twin.inputs.usb; live.presence = !!board.twin.inputs.presence; } };
   function redraw() {
     if (!live.vision) return;
-    const { layout, unplaced } = fromVision(live.vision, { usb: live.usb, presence: live.presence, leads: live.leads });
+    const { layout, unplaced } = fromVision(live.vision, live);
     live.unplaced = unplaced;
     board.showLayout(layout, { reframe: !live.framed });
+    board.twin?.step(0.02);                          // settle the circuit now, so the status is right before the next frame
     live.framed = true;
     readout.textContent = "";                        // showLayout narrates its clear/place; the readout is for hover
+    remark();
+  }
+  function remark() {
+    const a = live.activity;
+    board.mark({ look: a.phase === "looking" ? { rows: a.rows ?? [], holes: (a.holes ?? []).map(twinHole).filter(Boolean) } : null, target: live.target });
   }
   const simLed = () => {
     const parts = board.twin?.results?.parts ?? [];
@@ -120,13 +126,26 @@ export function mountTwin(el, { onStatus = () => {} } = {}) {
   function report() {
     const simLit = simLed();
     const realLit = live.vision ? !!live.vision.led : null;
-    if (simLit === last.simLit && realLit === last.realLit) return;
-    last = { simLit, realLit };
+    const a = live.activity;
+    const key = JSON.stringify([simLit, realLit, a.phase, a.rows, live.target]);
+    if (key === last) return;
+    last = key;
     const agree = simLit === null || realLit === null || simLit === realLit;
     board.note(agree ? "" : simLit
       ? "<b>The simulation lights the LED, but the camera sees it dark.</b> Check the LED's direction and that its legs share rows with the resistor and the ground wire."
       : "<b>The camera sees the LED lit, but the simulation doesn't.</b> Vision may have misread a hole; the board view shows where it thinks each part is.");
-    onStatus({ simLit, realLit, agree, unplaced: live.unplaced, parts: board.layout().parts.length });
+    onStatus({ simLit, realLit, agree, phase: a.phase, rows: a.rows ?? [], target: live.target, unplaced: live.unplaced });
+  }
+
+  // What the conversation says about the build: a radar in it, the resistor's value, which step is open.
+  const RADAR_WORDS = /\b(radar|ld2402|hlk)\b/i;
+  const POWER_STEP = /\b(power the|usb|5 ?volts?|plug in the power)\b/i;
+  const PRESENCE_STEP = /\b(walk|in front of the radar|wave)\b/i;
+  function ohmsFrom(text) {
+    const m = /(\d+(?:\.\d+)?)\s*(k|kilo|m|meg)?\s*(?:ohms?|Ω)?\s*resistor|(\d+(?:\.\d+)?)\s*(kilo|mega)?ohm/i.exec(text ?? "");
+    if (!m) return null;
+    const v = +(m[1] ?? m[3]), pre = (m[2] ?? m[4] ?? "").toLowerCase();
+    return v * (pre.startsWith("k") ? 1e3 : pre.startsWith("m") ? 1e6 : 1);
   }
 
   function resize() {
@@ -153,32 +172,59 @@ export function mountTwin(el, { onStatus = () => {} } = {}) {
   const api = {
     board,
     get twin() { return board.twin; },
+    // vision.state(): redraw only when the part list or the LED changed; activity just moves the highlights.
     applyVision(state) {
       if (!state || !Array.isArray(state.board)) return;
       pull();
       live.vision = state;
+      if (state.activity) live.activity = state.activity;
+      if (state.board.some((p) => p.part === "radar")) live.radar = true;
       // A lit LED on the bench means it's powered and someone is there: let the simulation agree.
       if (state.led) { live.usb = true; live.presence = true; }
-      redraw();
+      const sig = JSON.stringify([state.board, !!state.led]);
+      if (sig !== live.sig || !live.framed) { live.sig = sig; redraw(); } else remark();
+      report();
     },
     applyLog(line) {
       if (!line) return;
-      if (script) return script.handle(line);
-      if (/^Hi, I'm Bench Buddy/.test(line.said ?? "")) {
-        Object.assign(live, { usb: false, presence: false, leads: {} });
-        redraw();
-      }
       pull();
-      if (line.heard) {
-        const leads = leadsFrom(line.heard);
-        if (Object.keys(leads).length) { Object.assign(live.leads, leads); redraw(); }
+      if (/^Hi, I'm Bench Buddy/.test(line.said ?? "")) {
+        Object.assign(live, { usb: false, presence: false, leads: {}, radar: false, ohms: 1000, steps: [], target: null });
+        redraw();
+        return remark();
       }
-      if (line.step === "usb" && line.result === "pass") api.setUsb(true);
-      if (line.step === "finish" && line.result === "pass") api.setPresence(true);
+      const text = [line.said, line.heard, line.goal, line.use_case].filter(Boolean).join(" ");
+      let changed = false;
+      if (RADAR_WORDS.test(text) && !live.radar) live.radar = changed = true;
+      if (Array.isArray(line.parts)) {
+        const r = line.parts.find((p) => p?.type === "resistor" && p.value);
+        if (r) { live.ohms = +r.value; changed = true; }
+      }
+      if (line.heard) {
+        const o = ohmsFrom(line.heard);
+        if (o) { live.ohms = o; changed = true; }
+        const leads = leadsFrom(line.heard);
+        if (Object.keys(leads).length) { Object.assign(live.leads, leads); changed = true; }
+      }
+      if (Array.isArray(line.plan)) {
+        live.steps = line.plan;
+        if (!live.radar && line.plan.some((s) => RADAR_WORDS.test(s.say))) live.radar = changed = true;
+      }
+      // A step opens when its instruction is said: show where it goes. It closes when its check passes.
+      const open = line.said && live.steps.find((s) => s.say === line.said);
+      if (open) { live.target = { ...targetsFrom(open.say), step: open.id }; remark(); }
+      if (line.step && line.result === "pass") {
+        const done = live.steps.find((s) => s.id === line.step);
+        if (done && POWER_STEP.test(done.say)) api.setUsb(true);
+        if (done && PRESENCE_STEP.test(done.say)) api.setPresence(true);
+        if (live.target?.step === line.step) { live.target = null; remark(); }
+      }
+      if (line.transition === "DONE") { live.target = null; remark(); }
+      if (changed) redraw();
+      report();
     },
     setPresence(on) { live.presence = !!on; board.twin?.set("presence", live.presence); },
     setUsb(on) { live.usb = !!on; board.twin?.set("usb", live.usb); },
-    followScript(projectId) { live.vision = null; live.framed = true; script = follow(board, { url: null, projectId }); },
     dispose() { cancelAnimationFrame(raf); renderer.dispose(); el.innerHTML = ""; },
   };
   return api;
