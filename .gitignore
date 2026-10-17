@@ -32,3 +32,4 @@ outputs/
 frames/
 log.jsonl
 phrase_cache/
+calib.json

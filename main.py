@@ -1,6 +1,8 @@
 """Entry point.
 
     python main.py --fake                 # everything fake: no hardware, no API keys, no packages
+    python main.py --fake vision bench --ptt   # push-to-talk (Enter) instead of hands-free listening
+    python main.py --script               # the old fixed 555 script (fsm.py) instead of tutor mode
     python main.py --fake vision bench    # real voice + brain, fake vision + bench
     python main.py                        # everything real
     python main.py --fake --ui            # browser UI on http://localhost:8000 instead of the terminal
@@ -10,6 +12,7 @@ import os
 import threading
 
 from fsm import BenchBuddy
+from tutor import Tutor
 
 MODULES = ("vision", "voice", "brain", "bench")
 
@@ -28,7 +31,7 @@ def build(fake: set[str], args):
         voice = FakeVoice(speak=args.speak)
     else:
         from voice import Voice
-        voice = Voice()
+        voice = Voice(hands_free=not args.ptt)
 
     if "brain" in fake:
         from brain import FakeBrain
@@ -42,7 +45,13 @@ def build(fake: set[str], args):
         bench = FakeBench(fault=None if args.fault == "none" else args.fault)
     else:
         from bench_serial import Bench
-        bench = Bench(os.environ["SERIAL_PORT"])
+        try:
+            bench = Bench(os.environ["SERIAL_PORT"])
+        except Exception as e:                      # the radar demo has no Arduino
+            if args.script:
+                raise
+            print(f"[main] no Arduino ({e!r}); running without measurements")
+            bench = None
 
     return vision, voice, brain, bench
 
@@ -57,6 +66,8 @@ def main():
     p = argparse.ArgumentParser(description="Bench Buddy")
     p.add_argument("--fake", nargs="*", choices=MODULES, metavar="MODULE",
                    help=f"use fakes for these modules ({', '.join(MODULES)}); all of them if none listed")
+    p.add_argument("--script", action="store_true", help="run the fixed 555 script (fsm.py) instead of tutor mode")
+    p.add_argument("--ptt", action="store_true", help="push-to-talk with Enter instead of hands-free listening")
     p.add_argument("--fault", choices=("reset", "none"), default="reset",
                    help="fault the fake bench develops after the first measurement")
     p.add_argument("--speak", action="store_true", help="fake voice reads replies aloud with macOS say")
@@ -71,7 +82,7 @@ def main():
         from ui_server import UI, UIVoice
         ui = UI(port=args.port, vision=vision, voice=voice)
         voice = UIVoice(voice, ui)
-    buddy = BenchBuddy(vision, voice, brain, bench)
+    buddy = (BenchBuddy if args.script else Tutor)(vision, voice, brain, bench)
     if args.ui:
         ui.attach(buddy)
         ui.start(open_browser=not args.no_browser)

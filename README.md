@@ -7,8 +7,8 @@ The plan, roles, interfaces and timeline are in [PLAN.md](PLAN.md).
 ## Team
 
 - Bruno Hawkins ([@brunohawkins](https://github.com/brunohawkins))
-- [@SummerRainZozo](https://github.com/SummerRainZozo)
-- [@parthiv-n](https://github.com/parthiv-n)
+- Zoe Gong [@SummerRainZozo](https://github.com/SummerRainZozo)
+- Parthiv Naidu [@parthiv-n](https://github.com/parthiv-n)
 
 ## Quick start
 
@@ -36,7 +36,7 @@ python main.py --fake vision bench   # e.g. real voice + LLM, fake camera + Ardu
 | `voice.py` | L | Push-to-talk STT (OpenAI) and TTS (ElevenLabs) with a phrase cache |
 | `brain.py` | L | LLM: parts parsing, intent, phrasing replies |
 | `camera.py` | V | Threaded frame grabber; `python camera.py 1` to preview a camera index |
-| `calibrate.py` | V | `python calibrate.py --rows 63`: click 4 holes → warped board → (row, col) ↔ pixel |
+| `calibrate.py` | V | `python calibrate.py`: finds the board and every hole automatically → (row, col) ↔ pixel |
 | `vision.py` | V | Real-time view + placement check; `python vision.py --row 13 --colour red` to test live |
 | `ui_server.py` | UI | `--ui`: serves `ui/`, streams fsm log lines to the page, takes typed/spoken input |
 | `ui/` | UI | Browser front end (landing page, chat card, board view); see `ui/README.md` |

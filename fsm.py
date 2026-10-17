@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import project
+from brain import template
 from debug import probe
 from physics import predict, within
 
@@ -15,6 +16,9 @@ LOG_PATH = Path("log.jsonl")
 
 
 class BenchBuddy:
+    STEP_SUFFIX = " Say done when it's in."
+    UNSURE = "I can't see it clearly. Move your hand away or show me closer, then say done."
+
     def __init__(self, vision, voice, brain, bench):
         self.vision, self.voice, self.brain, self.bench = vision, voice, brain, bench
         self.state = "IDLE"
@@ -28,12 +32,27 @@ class BenchBuddy:
 
     def log(self, **fields) -> None:
         line = {"t": time.strftime("%H:%M:%S"), "state": self.state, **fields}
+        note = getattr(self.vision, "note", None)       # the vision model gets the conversation as context
+        if note and fields.get("said"):
+            note("Bench Buddy", fields["said"])
+        if note and fields.get("heard"):
+            note("User", fields["heard"])
         with LOG_PATH.open("a") as f:
             f.write(json.dumps(line) + "\n")
 
     def say(self, text: str) -> None:
-        self.log(said=text)
         self.voice.say(text)
+        self.log(said=text, tts_ms=getattr(self.voice, "last_latency_ms", None))
+
+    def phrases(self) -> list[str]:
+        """Every fixed line, so voice can cache them at startup."""
+        fixed = ["Hi, I'm Bench Buddy.", "Tell me what parts you have.", "Power's good.",
+                 "Measuring the blink rate.", "Let me measure.", "Say done when you've fixed it.",
+                 "Your blinker is working. Tell me if anything stops working.", self.UNSURE]
+        fixed += [s["say"] + self.STEP_SUFFIX for s in project.STEPS]
+        f, duty = predict(project.R1, project.R2, project.C)
+        fixed.append(template({"kind": "propose", "f": f, "duty": duty}))
+        return fixed + ["Sorry, I didn't catch that. " + p for p in fixed]
 
     def ask(self, prompt: str, accept: set[str]):
         """Say prompt, then listen until an accepted intent. NOT_WORKING always returns so the caller can go to DEBUG."""
@@ -41,7 +60,8 @@ class BenchBuddy:
         while True:
             text = self.voice.listen()
             intent = self.brain.classify(text, self.state)
-            self.log(heard=text, intent=intent.kind)
+            self.log(heard=text, intent=intent.kind, stt_ms=getattr(self.voice, "last_stt_ms", None),
+                     llm_ms=getattr(self.brain, "last_ms", None))
             if intent.kind in accept or intent.kind == "NOT_WORKING":
                 return text, intent
             if intent.kind == "REPEAT":
@@ -57,6 +77,7 @@ class BenchBuddy:
             "STEP": self.step, "CHECK": self.check, "MEASURE": self.measure,
             "DONE": self.done, "DEBUG": self.debug,
         }
+        self.voice.warm_cache(self.phrases())
         while True:
             nxt = handlers[self.state]()
             if nxt == "DEBUG" and self.state != "DEBUG":
@@ -94,7 +115,7 @@ class BenchBuddy:
         step = project.STEPS[self.step_i]
         if step["check"]["kind"] == "vision" and self.before is None:
             self.before = self.vision.snapshot()
-        prompt = self.retry_prompt or step["say"] + " Say done when it's in."
+        prompt = self.retry_prompt or step["say"] + self.STEP_SUFFIX
         self.retry_prompt = None
         _, intent = self.ask(prompt, {"DONE"})
         return "DEBUG" if intent.kind == "NOT_WORKING" else "CHECK"
@@ -121,7 +142,7 @@ class BenchBuddy:
             self.retry_prompt = detail + (" Move it and say done." if chk["kind"] == "vision"
                                           else " Check the connection and say done.")
         else:
-            self.retry_prompt = "I can't see it clearly. Move your hand away or show me closer, then say done."
+            self.retry_prompt = self.UNSURE
         return "STEP"
 
     def measure(self) -> str:

@@ -20,6 +20,7 @@ The UI is driven entirely by `fsm.py` log lines, the same dicts written to `log.
 | `POST /api/input` | UI → | `{"text": "done"}` (typed or browser-transcribed) or `{"ptt": "start" \| "stop"}` when `server_stt` |
 | `GET /camera.mjpg` | → UI | optional MJPEG of the phone camera with the hole grid |
 | `GET /frames/...` | → UI | annotated jpgs from `CheckResult.frame`, shown in the check card |
+| `GET /api/board` | → UI | live board state from vision (below) |
 
 Log lines the UI reacts to: `said`, `heard`, `transition`, `parts`/`missing`, `check: vision` (`step`, `result`, `detail`, `rows_found`, `frame`),
 `check: measure` (`detail: "predicted X Hz, measured Y Hz"`), `check: probe` (`node`, `detail`).
@@ -28,3 +29,25 @@ Files: `index.html`, `styles.css`, `js/app.mjs` (controller), `js/demo.mjs`, `js
 [anatomy](https://github.com/wheresryan22/anatomy)'s kit in `vendor/`, MIT), `js/mat.mjs` (mat rulers),
 `js/hero.mjs` (landing animation: line-art board, the parts channel and the swap loop). `assets/raspberry-pi.svg` is the
 `<svg>` cut out of `figures/raspberry-pi/raspberry-pi.html`; re-extract it if that figure is rebuilt.
+
+## Live board state from vision (for the 3D view)
+
+Whenever the board settles after a change, vision asks the OpenAI vision model (`vlm.judge`) what was plugged in or
+pulled out, keeps a part list, and writes a plain-English narration. The UI server pushes it as an SSE event
+`{"type": "board", ...}` (latest only, also sent to a page that connects later) and serves it on `GET /api/board`;
+it is also written to `frames/board_state.json`.
+
+```json
+{"t": "13:25:02",
+ "parts": [{"id": "wire1", "kind": "wire", "color": "red", "from": ["d", 20], "to": ["+L", 20],
+            "pins": [["d", 20], ["+L", 20]], "label": "Red wire", "detail": "d20 -> top + rail (row 20)"}],
+ "board": [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["d20", "+top20"]}],
+ "led": false, "led_at": null,
+ "summary": "The red wire's other end went into the top + rail.",
+ "narration": "A red jumper wire runs from d20 to the top + rail. Nothing else is on the board.",
+ "status": "..."}
+```
+
+`parts` uses the `PARTS` shape in `js/board.mjs` (rails `+L -L +R -R` = top +, top -, bottom +, bottom -), so it can
+be drawn directly. `kind` is `wire`, `radar`, `resistor`, `led` or `other`; `to` is null until a wire's second end is in;
+`pins` lists every hole (the radar module has several).
