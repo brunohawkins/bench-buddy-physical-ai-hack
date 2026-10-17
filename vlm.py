@@ -22,9 +22,10 @@ pins V, G, IO, TX, RX), a resistor, and an LED.
 Say what was just placed or removed, which rows its legs or pins are in, and anything that looks wrong, \
 for example both LED legs in the same row (shorted) or a part not pushed in. Only name a part you can \
 actually see in the image: most changes are a single jumper wire (coloured cable, black plug). Do not \
-name the radar module unless its circuit board is visible. If unsure, say so.
+name the radar module unless its circuit board is visible. Often nothing new was plugged in and only a \
+loose cable shifted: then say action "none". If unsure, say so.
 
-Reply as JSON only: {"component": str, "action": "placed"|"removed"|"unclear", "rows": [int], \
+Reply as JSON only: {"component": str, "action": "placed"|"removed"|"none"|"unclear", "rows": [int], \
 "rails": [str], "problem": str or null, "summary": "one short sentence to say out loud"}"""
 
 
