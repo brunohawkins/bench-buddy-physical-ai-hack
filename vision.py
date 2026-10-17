@@ -48,6 +48,7 @@ TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand 
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
+RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
 
 # OpenCV HSV: H 0-180, S and V 0-255.
 HSV_RANGES = {
@@ -205,16 +206,22 @@ def draw_result(board, warped, overlay: dict | None, expect_rows=()):
 # --- real-time -----------------------------------------------------------------------
 
 class Vision:
-    def __init__(self, camera, board=None, rows: int = 63):
+    def __init__(self, camera, board=None, rows: int = 63, persist: bool = True):
         import calibrate
         self.camera = camera
+        self.persist = persist                    # write calib.json (off in tests)
         if board is None:
+            # Always calibrate fresh from the camera; the saved file is only a fallback, so a stale or
+            # wrong calib.json can never poison a run.
             try:
-                board = calibrate.load()
-            except FileNotFoundError:
                 board, info = calibrate.calibrate_from_camera(camera, rows)
-                calibrate.save_board(board)
-                print(f"auto-calibrated: {info['holes']}/{info['expected']} holes")
+                print(f"auto-calibrated: {info['holes']}/{info['expected']} holes, "
+                      f"{'upright' if info['upright'] else 'rotated 180'}", flush=True)
+            except calibrate.CalibrationError as e:
+                board = calibrate.load()
+                if board.rows != rows:
+                    raise calibrate.CalibrationError(f"{e}; and calib.json is for a {board.rows}-row board") from e
+                print(f"auto-calibration failed ({e}); using calib.json", flush=True)
         self.board = board
         self._busy = False                        # true during a check: don't re-snap mid-comparison
         self.expect_rows: list[int] = []          # highlighted on the live view during a check
@@ -243,6 +250,11 @@ class Vision:
                 return None, None
             return self._still_since, self._raw.copy()
 
+    def _save_board(self):
+        import calibrate
+        if self.persist:
+            calibrate.save_board(self.board)
+
     def _aligned(self, raw):
         """Warp a raw frame to the board, re-calibrating from it first (the board shifts when a wire
         is pushed in). Keeps the current grid if calibration fails (e.g. a hand is in the way)."""
@@ -257,6 +269,7 @@ class Vision:
     def _watch_loop(self):
         import calibrate
         seen = None                               # still period already handled
+        big = 0                                   # consecutive still periods with a big change
         while True:
             time.sleep(0.1)
             if self._busy:
@@ -267,14 +280,20 @@ class Vision:
             board_img = self._aligned(raw)
             if self.baseline is None:
                 self.baseline, seen = board_img, period
-                calibrate.save_board(self.board)
+                self._save_board()
                 self.status = "watching the board"
                 continue
             mask = change_mask(self.baseline, board_img)
             if mask.mean() > TOO_MUCH:
-                self.status = "something big is over the board"
+                big += 1
                 seen = period                     # wait for the next movement
+                if big >= RELEARN_AFTER:          # it's not going away: accept the board as it is now
+                    self.baseline, big = board_img, 0
+                    self.status = "re-learned the board"
+                else:
+                    self.status = "something big is over the board"
                 continue
+            big = 0
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
             ends = [e for e in ends if e["row"] is not None and not self._near_known_wire(e)]
             if not ends:
@@ -303,7 +322,7 @@ class Vision:
             self.status = "wire " + " and ".join(parts)
             print(f"[{event['t']}] {self.status}", flush=True)
             self.baseline, seen = board2, period
-            calibrate.save_board(self.board)
+            self._save_board()
             with self._event_cv:
                 self.events.append(event)
                 self._event_cv.notify_all()

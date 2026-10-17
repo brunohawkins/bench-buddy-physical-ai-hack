@@ -124,7 +124,7 @@ def test_watcher_reports_placement_and_removal():
     import time
     from vision import Vision
     cam = ScriptedCamera()
-    v = Vision(cam, board=BOARD)
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
     deadline = time.time() + 5
     while v.baseline is None and time.time() < deadline:
         time.sleep(0.1)
