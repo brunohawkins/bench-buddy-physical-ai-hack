@@ -49,7 +49,7 @@ PLUG_OPEN = int(0.65 * PITCH) | 1    # opening kernel: wider than a cable, narro
 PLUG_MIN_AREA = 0.3 * PITCH ** 2     # smallest surviving blob treated as a plug
 PLUG_MAX_AREA = 8 * PITCH ** 2       # bigger than this is a hand or a component, not a plug
 PLUG_DARK = 80                       # Dupont housings are black: grey level below this is "plug dark"
-PLUG_DARK_MIN = 0.25                 # a candidate this dark (fraction of pixels) counts as a black housing
+PLUG_DARK_MIN = 0.2                  # a candidate must be at least this dark (fraction of pixels) to be a plug
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
@@ -111,12 +111,11 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
 
     ends = []
     for wire, cands in by_wire.items():
-        # prefer black housings over thick or lifted stretches of coloured cable
-        darkness = {i: max((grey_a[labels == i] < PLUG_DARK).mean(), (grey_b[labels == i] < PLUG_DARK).mean())
-                    for i in cands}
-        dark = [i for i in cands if darkness[i] >= PLUG_DARK_MIN]
-        if dark and len(dark) < len(cands):
-            cands = dark
+        # plugs are black housings: thick, lifted or moved stretches of coloured cable never count
+        cands = [i for i in cands if max((grey_a[labels == i] < PLUG_DARK).mean(),
+                                         (grey_b[labels == i] < PLUG_DARK).mean()) >= PLUG_DARK_MIN]
+        if not cands:
+            continue
         ys, xs = np.nonzero(wire_labels == wire)
         pts = np.stack([xs, ys], axis=1).astype(np.float32)
         border = (xs <= 2) | (ys <= 2) | (xs >= w - 3) | (ys >= h - 3)
@@ -130,13 +129,32 @@ def plug_ends(board, mask, before, after) -> tuple[list[dict], np.ndarray]:
             chosen = sorted({min(proj, key=proj.get), max(proj, key=proj.get)})
         for i in chosen:
             blob = labels == i
-            x, y = cents[i]
+            x, y = _pin_point(blob, wire_labels == wire, cents[i])
             d = np.linalg.norm(board.hole_px - (x, y), axis=1)
             k = int(np.argmin(d))
             row, col = board.holes[k] if d[k] < END_SNAP else (None, None)
             kind = "removed" if grey_a[blob].mean() > grey_b[blob].mean() else "placed"
             ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "kind": kind, "blob": wire})
     return ends, wire_labels
+
+
+def _pin_point(blob, wire, centre):
+    """Where the pin is under a plug. A housing lying tilted puts its centre half a hole short of the pin,
+    which is at the front: the edge facing away from where the cable joins. So take that far edge and
+    step back half a hole. Falls back to the centre when no cable is visible next to the plug."""
+    import cv2
+    near_cable = wire & ~cv2.dilate(blob.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    ys, xs = np.nonzero(near_cable)
+    close = np.hypot(xs - centre[0], ys - centre[1]) < 2.5 * PITCH
+    if close.sum() < 20:
+        return float(centre[0]), float(centre[1])
+    u = centre - np.array([xs[close].mean(), ys[close].mean()])
+    u /= max(np.linalg.norm(u), 1e-6)                      # from the cable towards the plug's front
+    by, bx = np.nonzero(blob)
+    far = float(((np.stack([bx, by], axis=1) - centre) @ u).max())
+    step = float(np.clip(far - 0.5 * PITCH, 0.0, PITCH))
+    x, y = centre + u * step
+    return float(x), float(y)
 
 
 def colour_fractions(image, mask) -> dict[str, float]:
