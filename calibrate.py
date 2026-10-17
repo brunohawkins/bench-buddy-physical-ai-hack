@@ -22,13 +22,19 @@ PITCH = 20                   # warped pixels per hole pitch
 MARGIN_ROW = 2 * PITCH       # beyond row 1 and row N
 MARGIN_COL = 5 * PITCH       # beyond columns a and j: room for the power rails
 
+# How this board is printed, seen with the red rail stripes above the blue ones. Checked on our board:
+# row 1 is on the left and column a is the TOP line of holes (a wire in d12 used to read as g12).
+ROW1_LEFT = True
+A_AT_BOTTOM = False
+TOP_COL = "j" if A_AT_BOTTOM else "a"    # the column drawn at the top of the flat view
+
 GRID = (150, 150, 150)
 HIGHLIGHT = (0, 200, 0)
 
 
 class Board:
     """Breadboard geometry for one calibration. In the warped image x runs along the rows (row 1 on the
-    left) and y across the columns (j at the top, a at the bottom), as you'd read the board."""
+    left) and y across the columns (TOP_COL at the top), as the camera sees the board: not mirrored."""
 
     def __init__(self, corners, rows: int, offsets=None):
         import cv2
@@ -47,7 +53,8 @@ class Board:
     @staticmethod
     def hole_xy(row: int, col: str) -> tuple[int, int]:
         """Pixel centre of a terminal hole in the warped image."""
-        return MARGIN_ROW + (row - 1) * PITCH, MARGIN_COL + (COL_POS["j"] - COL_POS[col]) * PITCH
+        down = COL_POS["j"] - COL_POS[col] if A_AT_BOTTOM else COL_POS[col]
+        return MARGIN_ROW + (row - 1) * PITCH, MARGIN_COL + down * PITCH
 
     def warp(self, frame):
         import cv2
@@ -64,7 +71,7 @@ class Board:
             cv2.circle(board, (x, y), 2, HIGHLIGHT if r in highlight_rows else GRID, -1)
         for r in range(1, self.rows + 1):
             if r == 1 or r % 5 == 0 or r in highlight_rows:
-                x, y = self.hole_xy(r, "j")
+                x, y = self.hole_xy(r, TOP_COL)
                 cv2.putText(board, str(r), (x - 8, y - PITCH), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                             HIGHLIGHT if r in highlight_rows else GRID, 1, cv2.LINE_AA)
         for c in COLS:
@@ -109,8 +116,6 @@ def load() -> Board:
 #    pairs is far more accurate than 4 clicks.
 # 5. A breadboard looks the same rotated 180 degrees; the red/blue rail stripes break the tie.
 
-ROW1_LEFT = True      # with the red rail stripes above the blue ones, row 1 is on the left...
-A_AT_BOTTOM = True    # ...and column a is the bottom line of holes. Flip these if your board is printed the other way.
 WORK_LEN = 1400       # rough-warp length of the board's long side, in pixels
 
 

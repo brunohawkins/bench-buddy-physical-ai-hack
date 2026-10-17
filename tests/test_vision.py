@@ -17,7 +17,7 @@ from vision import analyse  # noqa: E402
 ROWS = 30
 CAM = (1920, 1080)
 # Where holes a1, j1, jN, aN land in the camera image: a tilted, keystoned view.
-CORNERS = [(470, 700), (420, 380), (1480, 330), (1500, 760)]
+CORNERS = [(420, 380), (470, 700), (1500, 760), (1480, 330)]   # column a along the top, as on our board
 BOARD = Board(CORNERS, ROWS)
 
 RED, BLUE = (40, 40, 210), (200, 90, 30)
@@ -37,7 +37,7 @@ def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
         cv2.rectangle(flat, (x - 3, y - 3), (x + 3, y + 3), (60, 60, 60), -1)
     if wire_row:
         x, y = BOARD.hole_xy(wire_row, "c")
-        cv2.line(flat, (x, y), (x, y + 6 * PITCH), colour, 7)          # cable towards the rail below column a
+        cv2.line(flat, (x, y), (x, y - 6 * PITCH), colour, 7)          # cable towards the rail above column a
         plug(flat, x, y)
     if hand:
         cv2.ellipse(flat, (w // 2, h // 2), (w // 3, h // 2), 0, 0, 360, (120, 160, 210), -1)
