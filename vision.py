@@ -56,6 +56,7 @@ TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand 
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 HAND_MIN_AREA = 10 * PITCH ** 2  # thick skin-coloured change at least this big is a hand
+COMPONENT_MAX_SPAN = 12 * PITCH  # the radar module is ~8 holes across; a longer blob is cable
 COMPONENT_MIN_AREA = 2 * PITCH ** 2  # a non-plug change this big (after erasing thin cable) is a component
 LED_V = 235              # a lit LED: brightness (HSV V) at least this...
 LED_S = 120              # ...with strong colour (the pale rail stripes measure ~70)...
@@ -531,6 +532,9 @@ class Vision:
         for i in range(1, n):
             if stats[i, cv2.CC_STAT_AREA] < COMPONENT_MIN_AREA:
                 continue
+            (_, _), (bw, bh), _ = cv2.minAreaRect(np.column_stack(np.nonzero(labels == i)[::-1]).astype(np.float32))
+            if stats[i, cv2.CC_STAT_AREA] / max(bw, bh, 1) < 1.2 * PITCH or max(bw, bh) > COMPONENT_MAX_SPAN:
+                continue                                  # long and thin, or longer than any part: a cable that moved
             x0, w = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_WIDTH]
             for r in range(int(round((x0 - MARGIN_ROW) / PITCH)) + 1, int(round((x0 + w - MARGIN_ROW) / PITCH)) + 2):
                 if 1 <= r <= self.board.rows:
