@@ -55,6 +55,7 @@ PARALLAX = float(os.environ.get("VISION_PARALLAX", 0.022))  # a plug's top looks
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
+HAND_MIN_AREA = 10 * PITCH ** 2  # thick skin-coloured change at least this big is a hand
 COMPONENT_MIN_AREA = 2 * PITCH ** 2  # a non-plug change this big (after erasing thin cable) is a component
 LED_V = 235              # a lit LED: brightness (HSV V) at least this...
 LED_S = 120              # ...with strong colour (the pale rail stripes measure ~70)...
@@ -199,11 +200,22 @@ def colour_fractions(image, mask) -> dict[str, float]:
     return out
 
 
+def hand_in_view(after, mask) -> bool:
+    """Skin-coloured change too thick to be a cable, plug, LED or resistor: a hand or finger is over the board.
+    Fingers are ~6 holes wide; erasing everything under 2 holes thick leaves only them."""
+    import cv2
+    hsv = cv2.cvtColor(after, cv2.COLOR_BGR2HSV)
+    h, sat, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    skin = ((h <= 25) | (h >= 170)) & (sat >= 40) & (sat <= 170) & (v >= 90) & mask
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * PITCH + 1, 2 * PITCH + 1))
+    return int(cv2.morphologyEx(skin.astype(np.uint8), cv2.MORPH_OPEN, k).sum()) >= HAND_MIN_AREA
+
+
 def analyse(board, before, after, expect_rows: list[int], wire_colour: str | None) -> tuple[CheckResult, dict]:
     """Compare two warped boards. Returns the result and an overlay (mask + plugs) for drawing."""
     mask = change_mask(before, after)
     overlay = {"mask": mask, "ends": []}
-    if mask.mean() > TOO_MUCH:
+    if mask.mean() > TOO_MUCH or hand_in_view(after, mask):
         return CheckResult("unsure", "Something big is in the way. Move your hand away, then say done."), overlay
     ends, wire_labels = plug_ends(board, mask, before, after)
     overlay["ends"] = ends
@@ -390,7 +402,7 @@ class Vision:
             mask = change_mask(self.baseline, board_img)
             if DEBUG:
                 self._debug_dump(self.baseline, board_img, mask)
-            if mask.mean() > TOO_MUCH:
+            if mask.mean() > TOO_MUCH or hand_in_view(board_img, mask):
                 big += 1
                 seen = period                     # wait for the next movement
                 if big >= RELEARN_AFTER:          # it's not going away: accept the board as it is now
