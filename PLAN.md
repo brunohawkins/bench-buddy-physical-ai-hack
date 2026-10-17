@@ -37,6 +37,8 @@ Shared types are in `contracts.py` (`Snapshot`, `CheckResult`, `Intent`, `ProbeR
 Camera(source).latest() -> np.ndarray | None             # newest BGR frame
 Vision(camera).snapshot() -> Snapshot                    # stable warped board image
 Vision.check_placement(before, expect_rows, wire_colour) -> CheckResult   # pass | fail | unsure
+Vision.wait_for_placement(expect_rows, wire_colour, timeout) -> CheckResult | None  # hands-free: returns when a wire goes in
+Vision.wait_for_event(timeout) -> {kind: placed|removed, holes: ['i14'], rows: [14]} | None
 
 # --- L: voice.py, brain.py, fsm.py ----------------------------------------
 Voice().listen() -> str                                  # push-to-talk transcript
@@ -103,7 +105,8 @@ Row numbers are placeholders until H fixes the layout at 0:20.
    - A check waits for 0.8 s of stillness and compares before and after hole by hole (Lab colour distance, corrected for exposure drift).
    - It maps the changed holes to rows and runs an HSV colour test on them.
    - Two boards 1 s apart must agree. A hand in frame, nothing changed, or an ambiguous row all give `unsure`.
-4. `python vision.py --row 13 --colour red` is the dev harness: b takes "before", c runs the check, and thresholds are at the top of the file.
+4. **Fully automatic watching:** whenever the board is still, it compares the board with the last accepted state, and a wire end appearing or disappearing becomes an event ("wire placed at i14"). The live view marks every wire currently in the board. `python -u vision.py --row 13` judges each placement against row 13. There's nothing to press, and the thresholds are at the top of the file.
+   - For L: the state machine can call `vision.wait_for_placement([13], "red")` in STEP instead of waiting for "done". `FakeVision` has it too.
 5. `tests/test_vision.py`: synthetic tilted board covering correct row, wrong row, wrong colour, exposure drift, hand in frame, nothing changed, and auto-calibration.
 6. Stretch: VLM yes/no on a labelled crop when `unsure`; LED blink detection.
 

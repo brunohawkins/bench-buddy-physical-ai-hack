@@ -13,10 +13,14 @@ A check compares a stable "before" board with a stable "after" board:
   4. the wire's colour is measured along the blob
 Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure".
 
-Dev harness (calibrates itself if there's no calib.json):
+Watching is automatic: whenever the board has been still for STILL_FOR seconds it is compared with
+the last accepted state, and a wire end appearing or disappearing becomes an event ("placed i14",
+"removed i14"). Hands and big changes are never reported. The state machine can block on
+wait_for_placement(expect_rows) instead of waiting for the user to say "done".
 
-    python -u vision.py --row 13 --colour red [--source N]
-    keys: b = take "before", c = check, q = quit
+Live view (calibrates itself if there's no calib.json; nothing to press):
+
+    python -u vision.py [--row 13] [--colour red] [--source N]      # q quits
 """
 import threading
 import time
@@ -40,6 +44,7 @@ TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand 
 END_REGION = 0.7 * PITCH # a wire end is the centroid of blob pixels this close to the extreme point
 END_SNAP = 0.75 * PITCH  # max distance from a wire end to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
+CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RECAL_EVERY = 3.0        # seconds between self-calibration checks while the board is still
 RECAL_SHIFT = 0.3        # re-snap when the grid has moved by more than this many pitches
 
@@ -197,9 +202,98 @@ class Vision:
         self._motion = 1.0
         self._still_since = time.time()
         self._fps = 0.0
+        self.baseline = None                      # last accepted still board; events are changes from it
+        self.events: list[dict] = []              # {"t", "kind": placed|removed, "holes": ["i14"], "before", "after", ...}
+        self.wires: set[str] = set()              # wire ends currently in the board, e.g. {"i14"}
+        self._event_cv = threading.Condition()
         FRAMES_DIR.mkdir(exist_ok=True)
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._recalibrate_loop, daemon=True).start()
+        threading.Thread(target=self._watch_loop, daemon=True).start()
+
+    # --- automatic watching ---------------------------------------------------------
+
+    def _stable_board(self):
+        """(still-period id, warped board) if the board is currently still, else (None, None)."""
+        with self._lock:
+            if self._warped is None or time.time() - self._still_since < STILL_FOR:
+                return None, None
+            return self._still_since, self._warped.copy()
+
+    def _watch_loop(self):
+        import cv2
+        seen = None                               # still period already handled
+        while True:
+            time.sleep(0.1)
+            if self._busy:
+                continue
+            period, board_img = self._stable_board()
+            if period is None or period == seen:
+                continue
+            if self.baseline is None:
+                self.baseline, seen = board_img, period
+                self.status = "watching the board"
+                continue
+            mask = change_mask(self.baseline, board_img)
+            if mask.mean() > TOO_MUCH:
+                self.status = "something big is over the board"
+                seen = period                     # wait for the next movement
+                continue
+            ends, _ = wire_ends(self.board, mask)
+            placed = [e for e in ends if e["row"] is not None]
+            if not placed:
+                self.baseline, seen = board_img, period    # no wire change: absorb lighting drift
+                continue
+            time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
+            period2, board2 = self._stable_board()
+            if period2 != period:
+                continue                                    # moved again; re-evaluate when still
+            ends2, _ = wire_ends(self.board, change_mask(self.baseline, board2))
+            holes = sorted({f"{e['col']}{e['row']}" for e in placed})
+            if holes != sorted({f"{e['col']}{e['row']}" for e in ends2 if e["row"] is not None}):
+                continue
+            # removed if the changed area got brighter (white board showing again), placed otherwise
+            grey_before = cv2.cvtColor(self.baseline, cv2.COLOR_BGR2GRAY)[mask].mean()
+            grey_after = cv2.cvtColor(board2, cv2.COLOR_BGR2GRAY)[mask].mean()
+            kind = "removed" if grey_after > grey_before + 10 else "placed"
+            event = {"t": time.strftime("%H:%M:%S"), "kind": kind, "holes": holes,
+                     "rows": sorted({e["row"] for e in placed}), "before": self.baseline, "after": board2,
+                     "overlay": {"mask": mask, "ends": ends}}
+            self.wires = self.wires - set(holes) if kind == "removed" else self.wires | set(holes)
+            self.overlay = event["overlay"]
+            self.status = f"wire {kind} {'from' if kind == 'removed' else 'at'} {', '.join(holes)}"
+            print(f"[{event['t']}] {self.status}", flush=True)
+            self.baseline, seen = board2, period
+            with self._event_cv:
+                self.events.append(event)
+                self._event_cv.notify_all()
+
+    def wait_for_event(self, timeout: float | None = None, kind: str | None = None) -> dict | None:
+        """Block until the next event (optionally of one kind); None on timeout."""
+        deadline = None if timeout is None else time.time() + timeout
+        with self._event_cv:
+            start = len(self.events)
+            while True:
+                for e in self.events[start:]:
+                    if kind is None or e["kind"] == kind:
+                        return e
+                start = len(self.events)
+                remaining = None if deadline is None else deadline - time.time()
+                if remaining is not None and remaining <= 0:
+                    return None
+                self._event_cv.wait(remaining)
+
+    def wait_for_placement(self, expect_rows: list[int], wire_colour: str | None = None,
+                           timeout: float | None = 120) -> CheckResult | None:
+        """Hands-free check: wait for the next wire placement and judge it. None on timeout."""
+        self.expect_rows = list(expect_rows)
+        event = self.wait_for_event(timeout, kind="placed")
+        if event is None:
+            return None
+        result, overlay = analyse(self.board, event["before"], event["after"], expect_rows, wire_colour)
+        result.frame = self._save(draw_result(self.board, event["after"].copy(), overlay, expect_rows), result.status)
+        self.overlay, self.status = overlay, result.detail
+        return result
 
     def _recalibrate_loop(self):
         """Re-snap the grid if the board (or camera) has moved."""
@@ -221,6 +315,7 @@ class Vision:
             shift = float(np.linalg.norm(moved - old.hole_px, axis=1).mean()) / PITCH
             if shift > RECAL_SHIFT:
                 self.board = new
+                self.baseline = None                      # old baseline was warped with the old grid
                 calibrate.save_board(new)
                 self.status = f"board moved {shift:.1f} holes: recalibrated"
 
@@ -307,6 +402,9 @@ class Vision:
                 time.time() - self._still_since >= STILL_FOR, self._fps
         self.board.draw_on_camera(raw, self.expect_rows)
         draw_result(self.board, warped, self.overlay, self.expect_rows)
+        for hole in self.wires:                           # every wire end currently in the board
+            x, y = self.board.hole_px[self.board.holes.index((int(hole[1:]), hole[0]))].astype(int)
+            cv2.circle(warped, (x, y), int(0.3 * PITCH), (255, 200, 0), -1)
         w = 1280
         raw = cv2.resize(raw, (w, int(raw.shape[0] * w / raw.shape[1])))
         warped = cv2.resize(warped, (w, int(warped.shape[0] * w / warped.shape[1])))
@@ -343,57 +441,29 @@ class FakeVision:
             return CheckResult("fail", f"That went into row {row + 1}, it should be row {row}.", [row + 1])
         return CheckResult("pass", f"Row {row}, {wire_colour or 'wire'} in place. Looks good.", [row])
 
+    def wait_for_placement(self, expect_rows: list[int], wire_colour: str | None = None,
+                           timeout: float | None = 120) -> CheckResult | None:
+        return self.check_placement(Snapshot(image=None), expect_rows, wire_colour)
+
 
 if __name__ == "__main__":
     import argparse
     import cv2
     from camera import Camera, default_source, parse_source
 
-    p = argparse.ArgumentParser(description="Live vision dev harness")
-    p.add_argument("--row", type=int, nargs="+", required=True, help="expected row(s)")
+    p = argparse.ArgumentParser(description="Live vision: watches the board and reports wire placements")
+    p.add_argument("--row", type=int, nargs="+", default=None, help="expected row(s): judge each placement")
     p.add_argument("--colour", default=None, choices=list(HSV_RANGES))
     p.add_argument("--source", default=None, help="camera index or stream URL (default: CAMERA_SOURCE)")
     args = p.parse_args()
 
     vision = Vision(Camera(parse_source(args.source) if args.source else default_source()))
-    vision.expect_rows = args.row
-    state = {"before": None, "busy": False}
 
-    def act(fn):
-        def run():
-            state["busy"] = True
-            try:
-                fn()
-            finally:
-                state["busy"] = False
-        if not state["busy"]:
-            threading.Thread(target=run, daemon=True).start()
+    if args.row:
+        def judge():
+            while True:
+                r = vision.wait_for_placement(args.row, args.colour, timeout=None)
+                print(f"  check vs row {args.row}: {r.status.upper()} - {r.detail}", flush=True)
+        threading.Thread(target=judge, daemon=True).start()
 
-    def take_before():
-        state["before"] = vision.snapshot()
-        vision.overlay, vision.status = None, "before taken; place the wire, then press c"
-        print(vision.status, flush=True)
-
-    def check():
-        if state["before"] is None:
-            vision.status = "press b first"
-            return
-        r = vision.check_placement(state["before"], args.row, args.colour)
-        print(r, flush=True)
-        if vision.overlay:
-            ends = ", ".join(f"{e['col']}{e['row']}" if e["row"] else "off-grid" for e in vision.overlay["ends"])
-            print(f"changed {vision.overlay['mask'].mean():.1%} of board (hand if > {TOO_MUCH:.0%}); wire ends: {ends or 'none'}",
-                  flush=True)
-
-    vision.status = "press b to take 'before'"
-    while True:
-        frame = vision.view()
-        if frame is not None:
-            cv2.imshow("Bench Buddy vision", frame)
-        key = cv2.waitKey(15) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("b"):
-            act(take_before)
-        elif key == ord("c"):
-            act(check)
+    vision.show_forever()

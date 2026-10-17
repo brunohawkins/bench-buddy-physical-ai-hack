@@ -88,6 +88,49 @@ def test_wire_lying_on_board_both_ends():
     assert result.status == "pass", (result, overlay["ends"])
 
 
+class ScriptedCamera:
+    """Plays synthetic camera frames at ~30 fps; switch scenes by setting .scene."""
+
+    def __init__(self):
+        import threading
+        self.scenes = {"empty": camera_image(seed=11), "wire13": camera_image(wire_row=13, seed=12)}
+        self.scene, self.frame_id = "empty", 0
+        self._rng = np.random.default_rng(0)
+        threading.Thread(target=self._tick, daemon=True).start()
+
+    def _tick(self):
+        import time
+        while True:
+            self.frame_id += 1
+            time.sleep(1 / 30)
+
+    def latest(self):
+        img = self.scenes[self.scene].astype(np.int16) + self._rng.integers(-2, 3, (1, 1, 3))
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def latest_with_id(self):
+        return self.frame_id, self.latest()
+
+
+def test_watcher_reports_placement_and_removal():
+    import time
+    from vision import Vision
+    cam = ScriptedCamera()
+    v = Vision(cam, board=BOARD)
+    deadline = time.time() + 5
+    while v.baseline is None and time.time() < deadline:
+        time.sleep(0.1)
+    assert v.baseline is not None, "no baseline"
+    cam.scene = "wire13"
+    result = v.wait_for_placement([13], "red", timeout=6)
+    assert result is not None and result.status == "pass", result
+    assert any(h.endswith("13") for h in v.wires), v.wires
+    cam.scene = "empty"
+    e = v.wait_for_event(timeout=6)
+    assert e is not None and e["kind"] == "removed", e and e["kind"]
+    assert not v.wires, v.wires
+
+
 def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)
