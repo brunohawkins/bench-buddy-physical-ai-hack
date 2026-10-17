@@ -182,6 +182,9 @@ class Tutor:
             elif self.state == "STEP" and self.current()["check"]["kind"] == "confirm":
                 self.check()
             # camera/meter-checked steps: the LLM's "advance" doesn't count; the user says done to run the check
+        elif action == "advance" and ev["type"] == "vision" and self.state == "STEP" and self.current() \
+                and self.current()["check"]["kind"] == "look":
+            self.check()                             # the camera saw it happen: let the vision model check the step
 
     # --- plan -------------------------------------------------------------------
 
