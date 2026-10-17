@@ -26,6 +26,7 @@ Live view (calibrates itself if there's no calib.json; nothing to press):
 
     python -u vision.py [--row 13] [--colour red] [--source N]      # q quits
 """
+import os
 import threading
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ from calibrate import PITCH
 from contracts import CheckResult, Snapshot
 
 FRAMES_DIR = Path("frames")
+DEBUG = bool(os.environ.get("VISION_DEBUG"))   # save every evaluated before/after pair to frames/debug
 
 # Tuning. Expect to adjust these on the real board.
 MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
@@ -260,6 +262,18 @@ class Vision:
                 return None, None
             return self._still_since, self._raw.copy()
 
+    def _debug_dump(self, before, after, mask):
+        """VISION_DEBUG=1: save each evaluated before/after pair and print every plug candidate."""
+        import cv2
+        stamp = time.strftime("%H%M%S")
+        out = FRAMES_DIR / "debug"
+        out.mkdir(exist_ok=True)
+        cv2.imwrite(str(out / f"{stamp}_before.png"), before)
+        cv2.imwrite(str(out / f"{stamp}_after.png"), after)
+        ends, _ = plug_ends(self.board, mask, before, after)
+        print(f"  debug {stamp}: changed {mask.mean():.1%}; plugs " +
+              (", ".join(f"{e['kind']} {e['col']}{e['row']}" for e in ends) or "none"), flush=True)
+
     def _save_board(self):
         import calibrate
         if self.persist:
@@ -294,6 +308,8 @@ class Vision:
                 self.status = "watching the board"
                 continue
             mask = change_mask(self.baseline, board_img)
+            if DEBUG:
+                self._debug_dump(self.baseline, board_img, mask)
             if mask.mean() > TOO_MUCH:
                 big += 1
                 seen = period                     # wait for the next movement
