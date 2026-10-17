@@ -77,6 +77,17 @@ def test_nothing_changed_is_unsure():
     assert r.status == "unsure", r
 
 
+def test_wire_lying_on_board_both_ends():
+    w, h = BOARD.size
+    before = BOARD.warp(camera_image(seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    (x1, y1), (x2, y2) = BOARD.hole_xy(13, "c"), BOARD.hole_xy(20, "c")
+    import cv2 as _cv2
+    _cv2.line(flat, (int(x1), int(y1)), (int(x2), int(y2)), RED, 7)
+    result, overlay = analyse(BOARD, before, flat, [13, 20], "red")
+    assert result.status == "pass", (result, overlay["ends"])
+
+
 def test_calibration_round_trip():
     pts = BOARD.to_camera([BOARD.hole_xy(1, "a"), BOARD.hole_xy(ROWS, "j")])
     assert np.allclose(pts, [CORNERS[0], CORNERS[2]], atol=0.5)

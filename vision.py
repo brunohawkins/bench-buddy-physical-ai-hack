@@ -2,13 +2,20 @@
 
 A background thread warps every camera frame to the flat board (see calibrate.py), tracks motion
 and keeps an annotated live view. With no calib.json it calibrates itself from the image, and while
-the board is still it re-checks the calibration every few seconds, re-snapping if the board moved. A check compares a stable "before" board with a stable "after"
-board hole by hole: holes whose colour changed -> rows, then an HSV colour test on those holes.
+the board is still it re-checks the calibration every few seconds, re-snapping if the board moved.
+
+A check compares a stable "before" board with a stable "after" board:
+  1. change mask: pixels that differ from every position within +-2 px of "before" (forgives tiny
+     misalignment, so hole edges don't light up)
+  2. each changed blob is a wire; its inserted end is the point farthest from where it enters the
+     image (or, for a jumper lying wholly on the board, both extremes along its length)
+  3. each end snaps to the nearest terminal hole -> (row, column); ends on the rails are ignored
+  4. the wire's colour is measured along the blob
 Two "after" boards taken ~1 s apart must agree, otherwise the result is "unsure".
 
 Dev harness (calibrates itself if there's no calib.json):
 
-    python vision.py --row 13 --colour red [--source N]
+    python -u vision.py --row 13 --colour red [--source N]
     keys: b = take "before", c = check, q = quit
 """
 import threading
@@ -26,11 +33,13 @@ FRAMES_DIR = Path("frames")
 MOTION_PIXEL = 25        # grey-level change that counts a pixel as moving
 MOTION_STILL = 0.003     # fraction of moving pixels below which the board counts as still
 STILL_FOR = 0.8          # seconds of stillness before a board counts as stable
-HOLE_RADIUS = int(0.35 * PITCH)
-CHANGED = 18.0           # hole score (Lab distance above the board's median) that counts as changed
-MIN_MARGIN = 1.5         # expected rows must beat the next row by this factor
-TOO_MUCH = 0.25          # more than this fraction of holes changed: a hand or the board moved
-COLOUR_MIN = 0.15        # fraction of changed-hole pixels that must match the wire colour
+DIFF_PIXEL = 35.0        # Lab distance for a pixel to count as changed
+SHIFT_TOL = 2            # pixels of misalignment the change mask forgives
+MIN_WIRE_AREA = 0.5 * PITCH ** 2   # smallest blob (pixels) treated as a wire
+TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
+END_REGION = 0.7 * PITCH # a wire end is the centroid of blob pixels this close to the extreme point
+END_SNAP = 0.75 * PITCH  # max distance from a wire end to a terminal hole
+COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 RECAL_EVERY = 3.0        # seconds between self-calibration checks while the board is still
 RECAL_SHIFT = 0.3        # re-snap when the grid has moved by more than this many pitches
 
@@ -47,16 +56,52 @@ HSV_RANGES = {
 
 # --- pure analysis (no camera; unit-tested in tests/test_vision.py) ---------------
 
-def hole_scores(board, before, after) -> np.ndarray:
-    """Colour change per terminal hole, in Lab units above the board-wide median."""
+def change_mask(before, after) -> np.ndarray:
+    """Pixels that changed, forgiving up to SHIFT_TOL px of misalignment and auto-exposure drift."""
     import cv2
     a = cv2.cvtColor(cv2.GaussianBlur(before, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
     b = cv2.cvtColor(cv2.GaussianBlur(after, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
-    b[..., 0] *= np.median(a[..., 0]) / max(np.median(b[..., 0]), 1.0)   # cancel auto-exposure drift
-    dist = np.linalg.norm(a - b, axis=2)
-    r = HOLE_RADIUS
-    scores = np.array([dist[y - r:y + r + 1, x - r:x + r + 1].mean() for x, y in board.hole_px.astype(int)])
-    return scores - np.median(scores)
+    b[..., 0] *= np.median(a[..., 0]) / max(np.median(b[..., 0]), 1.0)
+    dist = np.full(a.shape[:2], np.inf, np.float32)
+    for dy in range(-SHIFT_TOL, SHIFT_TOL + 1):
+        for dx in range(-SHIFT_TOL, SHIFT_TOL + 1):
+            shifted = np.roll(a, (dy, dx), axis=(0, 1))
+            dist = np.minimum(dist, np.linalg.norm(shifted - b, axis=2))
+    mask = (dist > DIFF_PIXEL).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    return mask.astype(bool)
+
+
+def wire_ends(board, mask) -> list[dict]:
+    """Inserted ends of each changed blob, snapped to terminal holes where close enough.
+    Each end: {"x", "y", "row", "col", "blob"} with row/col None when not near a terminal hole."""
+    import cv2
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+    h, w = mask.shape
+    ends = []
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < MIN_WIRE_AREA:
+            continue
+        ys, xs = np.nonzero(labels == i)
+        pts = np.stack([xs, ys], axis=1).astype(np.float32)
+        border = (xs <= 2) | (ys <= 2) | (xs >= w - 3) | (ys >= h - 3)
+        if border.any():
+            entry = pts[border].mean(axis=0)                       # wire comes in from off the board
+            extremes = [pts[np.argmax(np.linalg.norm(pts - entry, axis=1))]]
+        else:                                                      # jumper lying wholly on the board
+            centred = pts - pts.mean(axis=0)
+            axis = np.linalg.svd(centred, full_matrices=False)[2][0]
+            proj = centred @ axis
+            extremes = [pts[np.argmin(proj)], pts[np.argmax(proj)]]
+        for ext in extremes:
+            near = pts[np.linalg.norm(pts - ext, axis=1) < END_REGION]
+            x, y = near.mean(axis=0)
+            d = np.linalg.norm(board.hole_px - (x, y), axis=1)
+            k = int(np.argmin(d))
+            row, col = board.holes[k] if d[k] < END_SNAP else (None, None)
+            ends.append({"x": float(x), "y": float(y), "row": row, "col": col, "blob": i})
+    return ends, labels
 
 
 def colour_fractions(image, mask) -> dict[str, float]:
@@ -73,57 +118,58 @@ def colour_fractions(image, mask) -> dict[str, float]:
     return out
 
 
-def analyse(board, before, after, expect_rows: list[int], wire_colour: str | None) -> tuple[CheckResult, np.ndarray]:
-    """Compare two warped boards. Returns the result and a per-hole 'changed' mask for drawing."""
-    scores = hole_scores(board, before, after)
-    changed = scores > CHANGED
-    if changed.mean() > TOO_MUCH:
-        return CheckResult("unsure", "Something big is in the way. Move your hand away, then say done."), changed
-    if not changed.any():
-        return CheckResult("unsure", "I don't see a new wire yet. Check it's pushed in, then say done."), changed
+def analyse(board, before, after, expect_rows: list[int], wire_colour: str | None) -> tuple[CheckResult, dict]:
+    """Compare two warped boards. Returns the result and an overlay (mask + wire ends) for drawing."""
+    mask = change_mask(before, after)
+    overlay = {"mask": mask, "ends": []}
+    if mask.mean() > TOO_MUCH:
+        return CheckResult("unsure", "Something big is in the way. Move your hand away, then say done."), overlay
+    ends, labels = wire_ends(board, mask)
+    overlay["ends"] = ends
+    placed = [e for e in ends if e["row"] is not None]
+    if not placed:
+        return CheckResult("unsure", "I don't see a wire end in the board yet. Check it's pushed in, then say done."), overlay
 
-    row_score = np.zeros(board.rows + 1)
-    for (r, _), s, c in zip(board.holes, scores, changed):
-        if c:
-            row_score[r] += s
-    ranked = [int(r) for r in np.argsort(-row_score) if row_score[r] > 0]
-    k = len(expect_rows)
-    top = sorted(ranked[:k])
-    runner_up = row_score[ranked[k]] if len(ranked) > k else 0.0
-    if runner_up and min(row_score[top]) < MIN_MARGIN * runner_up:
-        rows = ", ".join(str(r) for r in ranked[:k + 1])
-        return CheckResult("unsure", f"I can't tell which row; I see changes in rows {rows}. Show me closer.",
-                           ranked), changed
-
-    if top != sorted(expect_rows):
-        if k == 1:
-            detail = f"That went into row {top[0]}, it should be row {expect_rows[0]}."
+    rows_found = sorted({e["row"] for e in placed})
+    if set(rows_found) != set(expect_rows):
+        want = " and ".join(map(str, expect_rows))
+        wrong = [e for e in placed if e["row"] not in expect_rows]
+        if len(expect_rows) == 1 and len(placed) == 1:
+            detail = f"That went into row {placed[0]['row']}, it should be row {want}."
+        elif wrong:
+            detail = f"I see a wire end in row {' and '.join(str(e['row']) for e in wrong)}, it should be row {want}."
         else:
-            detail = f"I see rows {' and '.join(map(str, top))}, it should be rows {' and '.join(map(str, expect_rows))}."
-        return CheckResult("fail", detail, ranked), changed
+            detail = f"I only see a wire end in row {' and '.join(map(str, rows_found))}, it should be row {want}."
+        return CheckResult("fail", detail, rows_found), overlay
 
     if wire_colour:
-        mask = np.zeros(after.shape[:2], bool)
-        for (r, _), (x, y), c in zip(board.holes, board.hole_px.astype(int), changed):
-            if c and r in expect_rows:
-                mask[y - HOLE_RADIUS:y + HOLE_RADIUS + 1, x - HOLE_RADIUS:x + HOLE_RADIUS + 1] = True
-        fractions = colour_fractions(after, mask)
+        wire = np.isin(labels, list({e["blob"] for e in placed}))
+        fractions = colour_fractions(after, wire)
         if fractions.get(wire_colour, 0.0) < COLOUR_MIN:
             seen = max(fractions, key=fractions.get)
-            return CheckResult("fail", f"Right row, but that wire looks {seen}. Use a {wire_colour} wire.", ranked), changed
+            looks = f"looks {seen}" if fractions[seen] >= COLOUR_MIN else f"doesn't look {wire_colour}"
+            return CheckResult("fail", f"Right row, but that wire {looks}. Use a {wire_colour} wire.", rows_found), overlay
 
     rows = " and ".join(map(str, expect_rows))
-    return CheckResult("pass", f"Row {rows}{', ' + wire_colour if wire_colour else ''}. Looks good.", ranked), changed
+    return CheckResult("pass", f"Row {rows}{', ' + wire_colour if wire_colour else ''}. Looks good.", rows_found), overlay
 
 
-def draw_result(board, warped, changed: np.ndarray | None, expect_rows=()):
-    """Grid, expected rows and changed holes on a warped board (in place)."""
+def draw_result(board, warped, overlay: dict | None, expect_rows=()):
+    """Grid, expected rows, changed area and wire ends on a warped board (in place)."""
     import cv2
     board.draw_grid(warped, expect_rows)
-    if changed is not None:
-        for (r, _), (x, y), c in zip(board.holes, board.hole_px.astype(int), changed):
-            if c:
-                cv2.circle(warped, (x, y), HOLE_RADIUS + 2, (0, 200, 0) if r in expect_rows else (0, 0, 255), 2)
+    if overlay:
+        contours, _ = cv2.findContours(overlay["mask"].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(warped, contours, -1, (0, 220, 255), 1)
+        for e in overlay["ends"]:
+            if e["row"] is None:
+                cv2.circle(warped, (int(e["x"]), int(e["y"])), 5, (200, 200, 200), 1)
+                continue
+            x, y = board.hole_px[board.holes.index((e["row"], e["col"]))].astype(int)
+            good = e["row"] in expect_rows
+            colour = (0, 200, 0) if good else (0, 0, 255)
+            cv2.circle(warped, (x, y), int(0.45 * PITCH), colour, 2)
+            cv2.putText(warped, f"{e['col']}{e['row']}", (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
     return warped
 
 
@@ -143,7 +189,7 @@ class Vision:
         self.board = board
         self._busy = False                        # true during a check: don't re-snap mid-comparison
         self.expect_rows: list[int] = []          # highlighted on the live view during a check
-        self.changed: np.ndarray | None = None    # last check's changed holes, drawn on the live view
+        self.overlay: dict | None = None          # last check's changed area + wire ends, drawn on the live view
         self.status = ""                          # last check's detail line
         self._lock = threading.Lock()
         self._warped = None
@@ -244,11 +290,11 @@ class Vision:
             return result
 
         r1, _ = analyse(self.board, before.image, first, expect_rows, wire_colour)
-        r2, changed = analyse(self.board, before.image, second, expect_rows, wire_colour)
-        if (r1.status, r1.rows_found[:len(expect_rows)]) != (r2.status, r2.rows_found[:len(expect_rows)]):
+        r2, overlay = analyse(self.board, before.image, second, expect_rows, wire_colour)
+        if (r1.status, r1.rows_found) != (r2.status, r2.rows_found):
             r2 = CheckResult("unsure", "Hold still a moment, then say done.", r2.rows_found)
-        r2.frame = self._save(draw_result(self.board, second.copy(), changed, expect_rows), r2.status)
-        self.changed, self.status = changed, r2.detail
+        r2.frame = self._save(draw_result(self.board, second.copy(), overlay, expect_rows), r2.status)
+        self.overlay, self.status = overlay, r2.detail
         return r2
 
     def view(self):
@@ -260,7 +306,7 @@ class Vision:
             raw, warped, still, fps = self._raw.copy(), self._warped.copy(), \
                 time.time() - self._still_since >= STILL_FOR, self._fps
         self.board.draw_on_camera(raw, self.expect_rows)
-        draw_result(self.board, warped, self.changed, self.expect_rows)
+        draw_result(self.board, warped, self.overlay, self.expect_rows)
         w = 1280
         raw = cv2.resize(raw, (w, int(raw.shape[0] * w / raw.shape[1])))
         warped = cv2.resize(warped, (w, int(warped.shape[0] * w / warped.shape[1])))
@@ -325,21 +371,19 @@ if __name__ == "__main__":
 
     def take_before():
         state["before"] = vision.snapshot()
-        vision.changed, vision.status = None, "before taken; place the wire, then press c"
-        print(vision.status)
+        vision.overlay, vision.status = None, "before taken; place the wire, then press c"
+        print(vision.status, flush=True)
 
     def check():
         if state["before"] is None:
             vision.status = "press b first"
             return
         r = vision.check_placement(state["before"], args.row, args.colour)
-        print(r)
-        with vision._lock:
-            after = vision._warped.copy()
-        scores = hole_scores(vision.board, state["before"].image, after)
-        top = np.argsort(-scores)[:5]
-        print(f"top hole scores (changed > {CHANGED}):",
-              ", ".join(f"{vision.board.holes[i][1]}{vision.board.holes[i][0]}={scores[i]:.1f}" for i in top))
+        print(r, flush=True)
+        if vision.overlay:
+            ends = ", ".join(f"{e['col']}{e['row']}" if e["row"] else "off-grid" for e in vision.overlay["ends"])
+            print(f"changed {vision.overlay['mask'].mean():.1%} of board (hand if > {TOO_MUCH:.0%}); wire ends: {ends or 'none'}",
+                  flush=True)
 
     vision.status = "press b to take 'before'"
     while True:
