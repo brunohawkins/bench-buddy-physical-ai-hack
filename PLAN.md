@@ -81,18 +81,24 @@ Row numbers are placeholders until H fixes the layout at 0:20.
 
 ## Role details
 
-### V: Vision
+### V: Vision (built; tune on the real board)
 
-1. `camera.py`: background thread holding the latest frame. Source is an index (phone via Continuity Camera / Iriun) or a URL (Jetson), so switching is one config line.
-2. `calibrate.py`: click the 4 corners of the hole area once, save them to `calib.json`, warp to a flat top-down board, and map (row, column) ↔ pixel. Draw the grid on the live window. Re-click if the camera gets bumped (tape the stand down).
-3. `vision.py`:
-   - Wait for 1 s with no motion (frame diff below a threshold) before taking a snapshot.
-   - Diff the before and after warped frames and find the hole patches that changed.
-   - Map those patches to rows.
-   - Check the wire colour with an HSV mask at the expected holes.
-   - Take two snapshots 1 s apart, and only pass or fail if they agree. Otherwise return `unsure`.
-4. Develop on photos while H is still building the board. At 0:20, H takes about 10 photos for V: the empty board, the chip placed, the jumper in the right row, and the jumper one row off.
-5. Stretch: VLM yes/no on a labelled crop when `unsure`; LED blink count; a FastAPI dashboard.
+**Camera:** an iPhone via Continuity Camera, mounted above the board looking straight down (tripod, clamp or a stack of books, taped). It shows up as a normal webcam index on the Mac, so there's no app or streaming to build. Fallbacks: the Mac's built-in camera with the board propped facing it, then the Jetson.
+- Turn **Center Stage off** (Control Centre → Video Effects). It pans and crops the frame, which breaks the calibration.
+- Give your editor or terminal Camera permission (System Settings → Privacy & Security → Camera).
+
+**No segmentation model.** Segmentation can find a wire, but it can't tell you which 2.5 mm hole the wire is in, and there's no pretrained breadboard model good enough to rely on. Instead, everything is geometry: a homography maps the board to a flat grid where every hole has a known pixel. That runs at camera frame rate on the CPU.
+
+1. `camera.py`: background thread holding the newest frame (1920×1080). `python camera.py 1` previews a camera index.
+2. `calibrate.py`: `python calibrate.py --rows 63`, then click the centres of holes a1, j1, j63, a63 with the magnifier, and press Enter. This saves `calib.json`. Re-run it if the camera moves.
+3. `vision.py` (real time):
+   - A thread warps every frame, measures motion and keeps a live view: the camera with the projected grid, plus the flat board.
+   - A check waits for 0.8 s of stillness and compares before and after hole by hole (Lab colour distance, corrected for exposure drift).
+   - It maps the changed holes to rows and runs an HSV colour test on them.
+   - Two boards 1 s apart must agree. A hand in frame, nothing changed, or an ambiguous row all give `unsure`.
+4. `python vision.py --row 13 --colour red` is the dev harness: b takes "before", c runs the check, and thresholds are at the top of the file.
+5. `tests/test_vision.py`: synthetic tilted board covering correct row, wrong row, wrong colour, exposure drift, hand in frame, and nothing changed.
+6. Stretch: VLM yes/no on a labelled crop when `unsure`; LED blink detection; ArUco markers so the board can move without recalibrating.
 
 ### L: Voice + LLM
 

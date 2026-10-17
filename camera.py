@@ -1,7 +1,9 @@
 """Background thread that keeps the newest camera frame. Owner: V.
 
-Source is an int index (phone via Continuity Camera / Iriun, webcam) or a URL (Jetson stream).
-Run `python camera.py [source]` for a live preview; press q to quit.
+Source is an int index or a stream URL. On a Mac, an iPhone (Continuity Camera) shows up as an
+extra index next to the built-in camera. Try 0, 1, 2 with the preview:
+
+    python camera.py 1        # q quits
 """
 import sys
 import threading
@@ -13,12 +15,18 @@ def parse_source(s: str):
 
 
 class Camera:
-    def __init__(self, source=0):
+    def __init__(self, source=0, width: int = 1920, height: int = 1080):
         import cv2
-        self._cap = cv2.VideoCapture(source)
+        if isinstance(source, int) and sys.platform == "darwin":
+            self._cap = cv2.VideoCapture(source, cv2.CAP_AVFOUNDATION)
+        else:
+            self._cap = cv2.VideoCapture(source)
         if not self._cap.isOpened():
-            raise RuntimeError(f"can't open camera {source!r}")
+            raise RuntimeError(f"can't open camera {source!r} (on macOS, check Camera permission for your terminal/editor)")
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self._frame = None
+        self.frame_id = 0                # increments on every new frame
         self._lock = threading.Lock()
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -28,6 +36,7 @@ class Camera:
             if ok:
                 with self._lock:
                     self._frame = frame
+                    self.frame_id += 1
             else:
                 time.sleep(0.05)
 
@@ -35,6 +44,10 @@ class Camera:
         """Newest BGR frame, or None before the first one arrives."""
         with self._lock:
             return None if self._frame is None else self._frame.copy()
+
+    def latest_with_id(self):
+        with self._lock:
+            return self.frame_id, None if self._frame is None else self._frame.copy()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 """
 import argparse
 import os
+import threading
 
 from fsm import BenchBuddy
 
@@ -61,10 +62,26 @@ def main():
     args = p.parse_args()
     fake = set(MODULES) if args.fake == [] else set(args.fake or ())
 
+    vision, voice, brain, bench = build(fake, args)
+    buddy = BenchBuddy(vision, voice, brain, bench)
+
+    def run_quietly():
+        try:
+            buddy.run()
+        except (KeyboardInterrupt, EOFError):
+            pass
+
     try:
-        BenchBuddy(*build(fake, args)).run()
-    except (KeyboardInterrupt, EOFError):
-        print("\nbye")
+        if hasattr(vision, "show_forever"):
+            # macOS only allows OpenCV windows on the main thread, so the state machine runs beside it.
+            fsm = threading.Thread(target=run_quietly, daemon=True)
+            fsm.start()
+            vision.show_forever(stop=lambda: not fsm.is_alive())
+        else:
+            run_quietly()
+    except KeyboardInterrupt:
+        pass
+    print("\nbye")
 
 
 if __name__ == "__main__":

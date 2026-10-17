@@ -34,9 +34,10 @@ python main.py --fake vision bench   # e.g. real voice + LLM, fake camera + Ardu
 | `project.py` | L + H | The 555 project as data: required parts, steps, R/C values |
 | `voice.py` | L | Push-to-talk STT (OpenAI) and TTS (ElevenLabs) with a phrase cache |
 | `brain.py` | L | LLM: parts parsing, intent, phrasing replies |
-| `camera.py` | V | Threaded frame grabber; `python camera.py 0` to preview |
-| `calibrate.py` | V | 4 clicked corners → warped board → (row, col) ↔ pixel |
-| `vision.py` | V | Placement check: change detection + wire colour |
+| `camera.py` | V | Threaded frame grabber; `python camera.py 1` to preview a camera index |
+| `calibrate.py` | V | `python calibrate.py --rows 63`: click 4 holes → warped board → (row, col) ↔ pixel |
+| `vision.py` | V | Real-time view + placement check; `python vision.py --row 13 --colour red` to test live |
+| `tests/` | all | `.venv/bin/python tests/test_vision.py` |
 | `firmware/bench/bench.ino` | H | Arduino serial firmware (PING, READ, SAMPLE, FREQ) |
 | `bench_serial.py` | H | Python side of the serial protocol |
 | `physics.py` | H | 555 frequency prediction and tolerance |
