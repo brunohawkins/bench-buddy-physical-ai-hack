@@ -1,7 +1,9 @@
 """Hand-checked projects the tutor can run instead of an LLM-written plan. Owner: L.
 
 radar_led is the demo (from radar-led-demo.md). 555 wraps project.py, which fsm.py (--script) still uses.
-A step's check is "confirm" (the user says it's done), "vision" (expect_rows) or "measure" (needs the Arduino).
+A step's check is "confirm" (the user says it's done), "vision" (expect_rows), "look" (the vision model
+checks the step from the photo, the part list and the conversation; "ask" says what it should see) or
+"measure" (needs the Arduino).
 """
 import project
 
@@ -16,25 +18,30 @@ RADAR_LED = {
         {"desc": "a breadboard", "type": ("other",), "keywords": ("breadboard",)},
     ],
     "steps": [
-        {"id": "radar", "say": "Push the radar module into the breadboard so each of its five pins, V, G, IO, TX and RX, "
-                               "sits in its own row.",
-         "why": "Pins in the same row are connected, so each pin needs its own row. TX and RX stay unconnected.",
+        {"id": "radar", "say": "Look where the radar's five coloured leads join its little board: they're labelled V, G, IO, "
+                               "TX and RX. Tell me which colour goes to which label.",
+         "why": "V and G are power, IO is the output that goes high when it sees someone, TX and RX are serial and "
+                "stay unplugged. Knowing the colours lets me check your wiring.",
          "check": {"kind": "confirm"}},
-        {"id": "power", "say": "Connect the radar's V pin to the 5 volt rail, and its G pin to the ground rail.",
+        {"id": "power", "say": "Plug the radar's V lead into the plus rail and its G lead into the minus rail.",
          "why": "V and G power the module. If the silkscreen says 3.3 volts, use the 3.3 volt supply instead.",
-         "check": {"kind": "confirm"}},
-        {"id": "io", "say": "Connect the IO pin to one end of the 1 kilohm resistor.",
+         "check": {"kind": "look", "ask": "The radar's V lead is in a + power rail and its G lead is in a - power rail "
+                                          "(lead colours as said at the bench)."}},
+        {"id": "io", "say": "Plug the IO lead into row 30. Then put one leg of the 1 kilohm resistor in row 30 and the other "
+                            "leg in row 35.",
          "why": "IO goes high, about 3.3 volts, when it detects someone. The resistor limits the LED's current so "
-                "it doesn't overload the radar's IO pin.",
-         "check": {"kind": "confirm"}},
-        {"id": "led-anode", "say": "Connect the other end of the resistor to the LED's long leg.",
-         "why": "The long leg is the positive side, the anode. Current only flows from long leg to short leg.",
-         "check": {"kind": "confirm"}},
-        {"id": "led-cathode", "say": "Connect the LED's short leg to the ground rail.",
+                "it doesn't overload the radar's IO pin. Holes in the same row are connected.",
+         "check": {"kind": "look", "ask": "The radar's IO lead is in row 30, and a resistor has one leg in row 30 and the "
+                                          "other in row 35 (same half of the board)."}},
+        {"id": "led", "say": "Put the LED's long leg in row 35 and its short leg in row 36.",
+         "why": "The long leg is the positive side, the anode, so it joins the resistor. Current only flows from long "
+                "leg to short leg.",
+         "check": {"kind": "look", "ask": "An LED has its legs in row 35 and row 36 (same half as the resistor)."}},
+        {"id": "ground", "say": "Use a jumper wire to connect row 36 to the minus rail.",
          "why": "That closes the loop back to ground, so current can flow when IO goes high.",
-         "check": {"kind": "confirm"}},
-        {"id": "usb", "say": "Plug in the USB power.",
-         "why": "The laptop's USB port supplies the 5 volts and ground for the rails.",
+         "check": {"kind": "look", "ask": "A jumper wire connects row 36 to a - power rail."}},
+        {"id": "usb", "say": "Now power the rails: 5 volts to the plus rail and ground to the minus rail.",
+         "why": "The rails carry the 5 volts and ground to the radar.",
          "check": {"kind": "confirm"}},
         {"id": "finish", "say": "Now walk in front of the radar. Did the LED light up?",
          "why": "The radar sees you, IO goes high, and current flows through the resistor and LED.",

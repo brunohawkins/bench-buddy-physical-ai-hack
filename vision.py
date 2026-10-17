@@ -561,9 +561,34 @@ class Vision:
             self._emit(event)
 
     def note(self, who: str, text: str) -> None:
-        """Conversation context for the vision model, e.g. note("Bench Buddy", "Put the red wire in d20")."""
+        """Conversation context for the vision model, e.g. note("User", "the black lead is ground")."""
         if text:
-            self.context = (self.context + [f"{who}: {text}"])[-6:]
+            self.context = (self.context + [f"{who}: {text}"])[-20:]
+
+    def describe(self) -> str:
+        """Plain English for the tutor: the last change, then the whole board (from the vision model)."""
+        return " ".join(t for t in (self.summary, self.narration) if t)
+
+    def verify(self, step: str) -> CheckResult:
+        """Ask the vision model whether the board shows `step` done correctly (uses the part list and the
+        conversation). For steps the pixel rules can't check, e.g. "connect the radar's black lead to ground"."""
+        import vlm
+        with self._lock:
+            warped = None if self._warped is None else self._warped.copy()
+        if warped is None or not vlm.available():
+            return CheckResult("unsure", "I can't see the board right now.")
+        try:
+            r = vlm.verify(vlm.labelled_crop(self.board, warped, None, self.expect_rows, pad_rows=0), step,
+                           self.parts, "\n".join(self.context))
+        except Exception as e:
+            print(f"  [vlm] verify failed: {e!r}", flush=True)
+            return CheckResult("unsure", "I couldn't check that just now. Say done to try again.")
+        status = r.get("status") if r.get("status") in ("pass", "fail", "unsure") else "unsure"
+        result = CheckResult(status, r.get("detail") or "", [])
+        result.frame = self._save(warped, status)
+        print(f"[{time.strftime('%H:%M:%S')}] verify {step[:50]!r}: {status} - {result.detail}", flush=True)
+        self.status = result.detail
+        return result
 
     def _use_model(self) -> bool:
         import vlm
@@ -820,6 +845,7 @@ class Vision:
             self.led = {**self.led, "on": False}
         kind = "led_on" if lit else "led_off"
         self.status = f"LED {'ON near ' + self.led['label'] if lit else 'off'}"
+        self.summary = "The LED just lit up." if lit else "The LED went off."
         print(f"[{time.strftime('%H:%M:%S')}] {self.status}", flush=True)
         with self._event_cv:
             self.events.append({"t": time.strftime("%H:%M:%S"), "kind": kind, "led": dict(self.led),

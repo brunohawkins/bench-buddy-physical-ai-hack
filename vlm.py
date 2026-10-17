@@ -102,6 +102,30 @@ def judge(before_crop, after_crop, board: list | None = None, context: str | Non
     return out
 
 
+VERIFY_PROMPT = """Top-down photo of a breadboard, flattened. Row numbers are printed above and below the holes; \
+column letters a-e are the top half (a at the top) and f-j the bottom half. Power rails: "top" above column a, \
+"bottom" below column j; red stripe +, blue stripe -.
+
+Parts on the board (from earlier looks, may be incomplete): {board}
+
+What was said at the bench (context: it tells you lead colours and what the user is doing; the photo decides):
+{context}
+
+The user was asked to do this step: "{step}"
+
+Is the step done correctly, as far as the photo shows? Check the exact holes and rails. Breadboard rule: holes a-e \
+of one row are connected, f-j of one row are connected, and each rail is connected along its length.
+
+Reply JSON only: {{"status": "pass"|"fail"|"unsure", "detail": "<one or two short sentences to say out loud: what \
+you see and, if wrong, exactly what to move where>"}}"""
+
+
+def verify(image_bgr, step: str, board: list | None = None, context: str | None = None, timeout: float = 25) -> dict:
+    """Does the board show this step done? -> {"status": pass|fail|unsure, "detail"}. Raises on API errors."""
+    known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing recorded yet)"
+    return _ask(VERIFY_PROMPT.format(board=known, context=context or "(nothing)", step=step), [image_bgr], timeout)
+
+
 def describe(image_bgr, question: str | None = None, timeout: float = 20, hint: str | None = None) -> dict:
     """Ask the vision model about one labelled board image. hint: what OpenCV saw. Raises on API errors."""
     text = PROMPT + (f"\n\nThe pixel tracker saw: {hint} (it can be wrong)." if hint else "") \

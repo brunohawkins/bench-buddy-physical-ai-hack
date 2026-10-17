@@ -50,6 +50,11 @@ class Tutor:
 
     def log(self, **fields) -> None:
         line = {"t": time.strftime("%H:%M:%S"), "state": self.state, **fields}
+        note = getattr(self.vision, "note", None)       # the vision model gets the conversation as context
+        if note and fields.get("said"):
+            note("Bench Buddy", fields["said"])
+        if note and fields.get("heard"):
+            note("User", fields["heard"])
         with LOG_PATH.open("a") as f:
             f.write(json.dumps(line, default=str) + "\n")
 
@@ -313,6 +318,9 @@ class Tutor:
         if chk["kind"] == "vision":
             r = self.vision.check_placement(self.before, chk["expect_rows"], chk.get("wire_colour"))
             status, detail, frame = r.status, r.detail, r.frame
+        elif chk["kind"] == "look" and hasattr(self.vision, "verify"):
+            r = self.vision.verify(chk.get("ask") or step["say"])     # the vision model checks the step
+            status, detail, frame = r.status, r.detail, r.frame
         elif chk["kind"] == "measure" and self.bench is not None:
             mv = self.bench.read(chk["pin"])
             lo, hi = chk["expect_mv"]
@@ -325,7 +333,7 @@ class Tutor:
         self.last_check = {"step": step["id"], "result": status, "detail": detail}
         self.log(step=step["id"], check=chk["kind"], result=status, detail=detail, frame=frame)
         if status == "pass":
-            if chk["kind"] == "vision":
+            if chk["kind"] in ("vision", "look"):
                 self.say(detail)
             return self.open_step(self.step_i + 1)
         self.goto("STEP")
