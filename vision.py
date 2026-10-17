@@ -50,7 +50,7 @@ PLUG_MIN_AREA = 0.3 * PITCH ** 2     # smallest surviving blob treated as a plug
 PLUG_MAX_AREA = 8 * PITCH ** 2       # bigger than this is a hand or a component, not a plug
 PLUG_DARK = 80                       # Dupont housings are black: grey level below this is "plug dark"
 PLUG_DARK_MIN = 0.2                  # a candidate must be at least this dark (fraction of pixels) to be a plug
-PARALLAX = float(os.environ.get("VISION_PARALLAX", 0.045))  # a plug's top looks this fraction further from the
+PARALLAX = float(os.environ.get("VISION_PARALLAX", 0.022))  # a plug's top looks this fraction further from the
                                      # frame centre than its hole (housing height / camera height); 0 = off
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
@@ -401,6 +401,7 @@ class Vision:
                 continue
             big = 0
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
+            ends = [self._snap_removed(e) for e in ends]
             ends = [e for e in ends if e["label"] is not None and not self._near_known_wire(e)]
             if not ends:
                 rows = self._component_rows(mask)
@@ -421,7 +422,7 @@ class Vision:
                 continue                                    # moved again; re-evaluate when still
             board2 = self.board.warp(raw2)
             ends2, _ = plug_ends(self.board, change_mask(self.baseline, board2), self.baseline, board2)
-            ends2 = [e for e in ends2 if not self._near_known_wire(e)]
+            ends2 = [e for e in map(self._snap_removed, ends2) if not self._near_known_wire(e)]
             key = lambda es: sorted((e["kind"], e["label"]) for e in es if e["label"] is not None)
             if key(ends) != key(ends2):
                 continue
@@ -501,6 +502,17 @@ class Vision:
                 if 1 <= r <= self.board.rows:
                     rows.add(r)
         return sorted(rows)
+
+    def _snap_removed(self, end: dict) -> dict:
+        """A removal within a hole or so of a wire we saw go in is that wire: report the hole it was placed in."""
+        if end["kind"] != "removed" or not self.wires:
+            return end
+        label, (x, y) = min(self.wires.items(), key=lambda kv: np.hypot(end["x"] - kv[1][0], end["y"] - kv[1][1]))
+        if np.hypot(end["x"] - x, end["y"] - y) > 1.5 * PITCH:
+            return end
+        row = int(label[1:]) if label[0].isalpha() and label[1:].isdigit() else None
+        rail = None if row is not None else label.removesuffix(" rail")
+        return {**end, "x": x, "y": y, "label": label, "row": row, "col": label[0] if row else None, "rail": rail}
 
     def _near_known_wire(self, end: dict) -> bool:
         """A 'placement' within a hole of a wire already in the board is that wire's cable swinging."""
