@@ -3,8 +3,12 @@
 
     .venv/bin/python -m pytest tests/      or      .venv/bin/python tests/test_vision.py
 """
+import os
 import sys
 from pathlib import Path
+
+os.environ["VISION_PARALLAX"] = "0"   # synthetic images are flat: no plug height
+os.environ["VISION_VLM"] = "0"        # pixel rules only, offline; the model path has its own test
 
 import cv2
 import numpy as np
@@ -17,10 +21,16 @@ from vision import analyse  # noqa: E402
 ROWS = 30
 CAM = (1920, 1080)
 # Where holes a1, j1, jN, aN land in the camera image: a tilted, keystoned view.
-CORNERS = [(470, 700), (420, 380), (1480, 330), (1500, 760)]
+CORNERS = [(420, 380), (470, 700), (1500, 760), (1480, 330)]   # column a along the top, as on our board
 BOARD = Board(CORNERS, ROWS)
 
 RED, BLUE = (40, 40, 210), (200, 90, 30)
+
+
+def plug(img, x, y):
+    """A black Dupont housing seen from above, centred on the hole."""
+    h = int(0.55 * PITCH)
+    cv2.rectangle(img, (x - h, y - h), (x + h, y + h), (25, 25, 25), -1)
 
 
 def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
@@ -31,8 +41,8 @@ def camera_image(wire_row=None, colour=RED, brightness=1.0, hand=False, seed=0):
         cv2.rectangle(flat, (x - 3, y - 3), (x + 3, y + 3), (60, 60, 60), -1)
     if wire_row:
         x, y = BOARD.hole_xy(wire_row, "c")
-        cv2.line(flat, (x, y), (x, y + 6 * PITCH), colour, 7)          # towards the rail below column a
-        cv2.circle(flat, (x, y), 5, colour, -1)
+        cv2.line(flat, (x, y), (x, y - 6 * PITCH), colour, 7)          # cable towards the rail above column a
+        plug(flat, x, y)
     if hand:
         cv2.ellipse(flat, (w // 2, h // 2), (w // 3, h // 2), 0, 0, 360, (120, 160, 210), -1)
     cam = cv2.warpPerspective(flat, BOARD.H_inv, CAM, borderValue=(40, 40, 40))
@@ -84,6 +94,8 @@ def test_wire_lying_on_board_both_ends():
     (x1, y1), (x2, y2) = BOARD.hole_xy(13, "c"), BOARD.hole_xy(20, "c")
     import cv2 as _cv2
     _cv2.line(flat, (int(x1), int(y1)), (int(x2), int(y2)), RED, 7)
+    plug(flat, int(x1), int(y1))
+    plug(flat, int(x2), int(y2))
     result, overlay = analyse(BOARD, before, flat, [13, 20], "red")
     assert result.status == "pass", (result, overlay["ends"])
 
@@ -116,7 +128,7 @@ def test_watcher_reports_placement_and_removal():
     import time
     from vision import Vision
     cam = ScriptedCamera()
-    v = Vision(cam, board=BOARD)
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
     deadline = time.time() + 5
     while v.baseline is None and time.time() < deadline:
         time.sleep(0.1)
@@ -128,7 +140,109 @@ def test_watcher_reports_placement_and_removal():
     cam.scene = "empty"
     e = v.wait_for_event(timeout=6)
     assert e is not None and e["kind"] == "removed", e and e["kind"]
+    assert not e["placed"], e["placed"]
     assert not v.wires, v.wires
+
+
+def test_cable_moving_is_not_a_placement():
+    before = BOARD.warp(camera_image(wire_row=13, seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    x, y = BOARD.hole_xy(13, "c")
+    cv2.line(flat, (x, y), (x + 4 * PITCH, y + 6 * PITCH), RED, 7)    # same plug, cable swung sideways
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, [13], "red")
+    assert result.status != "fail", (result, overlay["ends"])     # never blames a different row
+
+
+def test_thick_cable_arc_does_not_beat_black_plug():
+    before = BOARD.warp(camera_image(seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    w, h = BOARD.size
+    x, y = BOARD.hole_xy(12, "i")
+    ax, ay = BOARD.hole_xy(9, "j")
+    cv2.line(flat, (0, h // 2), (ax, ay), RED, 7)                      # cable from off the board...
+    cv2.circle(flat, (ax, ay), int(0.6 * PITCH), RED, -1)              # ...lifted arc: thick, survives opening
+    cv2.line(flat, (ax, ay), (x, y), RED, 7)
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, [12], "red")
+    assert result.status == "pass", (result, [(e["col"], e["row"]) for e in overlay["ends"]])
+
+
+def test_wire_into_power_rail():
+    from calibrate import MARGIN_COL, RAILS
+    before = BOARD.warp(camera_image(seed=1))
+    flat = BOARD.warp(camera_image(seed=2))
+    x = BOARD.hole_xy(20, "a")[0]
+    y = int(MARGIN_COL + RAILS["top +"] * PITCH)
+    cv2.line(flat, (x, y), (x + 3 * PITCH, y + 5 * PITCH), RED, 7)
+    plug(flat, x, y)
+    result, overlay = analyse(BOARD, before, flat, ["+"], "red")
+    assert result.status == "pass", (result, [e["label"] for e in overlay["ends"]])
+    result, _ = analyse(BOARD, before, flat, ["-"], "red")
+    assert result.status == "fail" and "top + rail" in result.detail, result
+
+
+def test_led_turns_on_and_off():
+    import time
+    from vision import Vision
+    cam = ScriptedCamera()
+    lit = camera_image(seed=11).copy()
+    centre = tuple(int(c) for c in BOARD.to_camera([BOARD.hole_xy(30, "e")])[0])
+    cv2.circle(lit, centre, 6, (40, 40, 255), -1)        # saturated red core...
+    cv2.circle(lit, centre, 3, (200, 200, 255), -1)      # ...with a bright centre
+    cam.scenes["led"] = lit
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+    time.sleep(3.0)                                      # past the LED warm-up
+    cam.scene = "led"
+    e = v.wait_for_event(timeout=5, kind="led_on")
+    assert e is not None and abs(e["led"]["row"] - 30) <= 1, e
+    cam.scene = "empty"
+    e = v.wait_for_event(timeout=5, kind="led_off")
+    assert e is not None, "LED never reported off"
+
+
+def test_bright_red_wire_is_not_an_led():
+    import time
+    from vision import Vision
+    cam = ScriptedCamera()
+    cam.scenes["bright"] = camera_image(wire_row=13, colour=(60, 60, 255), seed=12)   # glossy red cable, V=255
+    v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+    time.sleep(3.0)
+    cam.scene = "bright"
+    e = v.wait_for_event(timeout=6)
+    assert e is not None and e["kind"] == "placed", e and e["kind"]
+    time.sleep(1.5)
+    assert not v.led["on"], v.led
+
+
+def test_model_judges_placement_and_tracks_state():
+    import time
+    import vlm
+    from vision import Vision, parse_hole
+    assert parse_hole("d13") == (13, "d", None) and parse_hole("+top13") == (13, None, "top +")
+    seen = []
+
+    def fake_judge(before, after, board=None, context=None, timeout=25):
+        seen.append(board)
+        return {"changes": [{"part": "wire", "action": "placed", "holes": ["d13"], "colour": "red"}],
+                "board": [{"id": "wire1", "part": "wire", "colour": "red", "holes": ["d13", "+top13"]}],
+                "summary": "Red wire into d13.", "narration": "One red wire from d13 to the top + rail."}
+    real = vlm.judge, vlm.available
+    vlm.judge, vlm.available = fake_judge, (lambda: True)
+    try:
+        cam = ScriptedCamera()
+        v = Vision(cam, board=BOARD, rows=ROWS, persist=False)
+        deadline = time.time() + 5
+        while v.baseline is None and time.time() < deadline:
+            time.sleep(0.1)
+        cam.scene = "wire13"
+        result = v.wait_for_placement([13], "red", timeout=8)
+        assert result is not None and result.status == "pass", result
+        st = v.state()
+        assert st["parts"][0]["from"] == ["d", 13] and st["parts"][0]["to"] == ["+L", 13], st["parts"]
+        assert "red wire" in st["narration"], st
+    finally:
+        vlm.judge, vlm.available = real
 
 
 def test_calibration_round_trip():

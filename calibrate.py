@@ -20,7 +20,16 @@ COLS = "abcdefghij"
 COL_POS = {c: i for i, c in enumerate("abcde")} | {c: i + 7 for i, c in enumerate("fghij")}
 PITCH = 20                   # warped pixels per hole pitch
 MARGIN_ROW = 2 * PITCH       # beyond row 1 and row N
-MARGIN_COL = 5 * PITCH       # beyond columns a and j: room for the power rails
+MARGIN_COL = 7 * PITCH       # beyond columns a and j: room for the power rails and plugs sitting in them
+
+# How this board is printed, seen with the red rail stripes above the blue ones. Checked on our board:
+# row 1 is on the left and column a is the TOP line of holes (a wire in d12 used to read as g12).
+ROW1_LEFT = True
+A_AT_BOTTOM = False
+TOP_COL = "j" if A_AT_BOTTOM else "a"    # the column drawn at the top of the flat view
+# Power-rail hole lines, in hole pitches down from the top terminal line, measured on our board. The
+# red stripe sits beside each + line, the blue beside each - line.
+RAILS = {"top +": -4.07, "top -": -2.86, "bottom +": 13.73, "bottom -": 14.95}
 
 GRID = (150, 150, 150)
 HIGHLIGHT = (0, 200, 0)
@@ -28,7 +37,7 @@ HIGHLIGHT = (0, 200, 0)
 
 class Board:
     """Breadboard geometry for one calibration. In the warped image x runs along the rows (row 1 on the
-    left) and y across the columns (j at the top, a at the bottom), as you'd read the board."""
+    left) and y across the columns (TOP_COL at the top), as the camera sees the board: not mirrored."""
 
     def __init__(self, corners, rows: int, offsets=None):
         import cv2
@@ -47,7 +56,17 @@ class Board:
     @staticmethod
     def hole_xy(row: int, col: str) -> tuple[int, int]:
         """Pixel centre of a terminal hole in the warped image."""
-        return MARGIN_ROW + (row - 1) * PITCH, MARGIN_COL + (COL_POS["j"] - COL_POS[col]) * PITCH
+        down = COL_POS["j"] - COL_POS[col] if A_AT_BOTTOM else COL_POS[col]
+        return MARGIN_ROW + (row - 1) * PITCH, MARGIN_COL + down * PITCH
+
+    def rail_at(self, x: float, y: float, tol: float = 0.45) -> str | None:
+        """Name of the power rail under warped point (x, y), e.g. "top +", or None."""
+        if not MARGIN_ROW - PITCH <= x <= MARGIN_ROW + self.rows * PITCH:
+            return None
+        for name, down in RAILS.items():
+            if abs(y - (MARGIN_COL + down * PITCH)) < tol * PITCH:
+                return name
+        return None
 
     def warp(self, frame):
         import cv2
@@ -64,7 +83,7 @@ class Board:
             cv2.circle(board, (x, y), 2, HIGHLIGHT if r in highlight_rows else GRID, -1)
         for r in range(1, self.rows + 1):
             if r == 1 or r % 5 == 0 or r in highlight_rows:
-                x, y = self.hole_xy(r, "j")
+                x, y = self.hole_xy(r, TOP_COL)
                 cv2.putText(board, str(r), (x - 8, y - PITCH), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                             HIGHLIGHT if r in highlight_rows else GRID, 1, cv2.LINE_AA)
         for c in COLS:
@@ -109,8 +128,6 @@ def load() -> Board:
 #    pairs is far more accurate than 4 clicks.
 # 5. A breadboard looks the same rotated 180 degrees; the red/blue rail stripes break the tie.
 
-ROW1_LEFT = True      # with the red rail stripes above the blue ones, row 1 is on the left...
-A_AT_BOTTOM = True    # ...and column a is the bottom line of holes. Flip these if your board is printed the other way.
 WORK_LEN = 1400       # rough-warp length of the board's long side, in pixels
 
 
@@ -183,8 +200,27 @@ def _clusters(values, gap):
     return groups
 
 
-def auto_calibrate(frame, rows: int = 63) -> tuple["Board", dict]:
-    """Board from one camera frame, no clicks. Raises CalibrationError if the board can't be found."""
+def flipped(board: "Board") -> "Board":
+    """The same grid with the board's ends swapped (row 1 <-> row N, column a <-> j)."""
+    c = board.corners
+    offsets = board.offsets.copy()
+    offsets[1:] = -offsets[1:][::-1]
+    return Board([c[2], c[3], c[0], c[1]], board.rows, offsets)
+
+
+def auto_calibrate(frame, rows: int = 63, prev: "Board | None" = None) -> tuple["Board", dict]:
+    """Board from one camera frame, no clicks. Raises CalibrationError if the board can't be found.
+    With prev, keep whichever orientation matches it, so row numbers never flip mid-session."""
+    board, info = _auto_calibrate(frame, rows)
+    if prev is not None and prev.rows == rows:
+        alt = flipped(board)
+        if np.linalg.norm(alt.hole_cam - prev.hole_cam, axis=1).mean() < \
+                np.linalg.norm(board.hole_cam - prev.hole_cam, axis=1).mean():
+            board, info = alt, {**info, "upright": not info["upright"]}
+    return board, info
+
+
+def _auto_calibrate(frame, rows: int) -> tuple["Board", dict]:
     best, errors = None, []
     for box, length, width in _board_candidates(frame):
         try:
@@ -319,13 +355,23 @@ def _fit(frame, box, length, width, rows: int) -> tuple["Board", dict]:
     if index[-1] != rows - 1:
         raise CalibrationError(f"found {index[-1] + 1} rows, expected {rows}")
 
-    # Orientation from the rail stripes: red above blue = upright.
+    # Orientation from the rail stripes: red above blue = upright. Only long straight lines count, so a
+    # red wire lying on the board can't outvote the stripes.
     hsv = cv2.cvtColor(rect, cv2.COLOR_BGR2HSV)
-    red = (cv2.inRange(hsv, (0, 50, 80), (10, 255, 255)) | cv2.inRange(hsv, (165, 50, 80), (180, 255, 255))) > 0
-    blue = cv2.inRange(hsv, (95, 50, 60), (130, 255, 255)) > 0
-    ry, by = np.nonzero(red)[0], np.nonzero(blue)[0]
-    stripes = len(ry) > 200 and len(by) > 200
-    upright = ry.mean() < by.mean() if stripes else True
+    red = cv2.inRange(hsv, (0, 50, 80), (10, 255, 255)) | cv2.inRange(hsv, (165, 50, 80), (180, 255, 255))
+    blue = cv2.inRange(hsv, (95, 50, 60), (130, 255, 255))
+
+    def stripe_ys(colour_mask):
+        segs = cv2.HoughLinesP(colour_mask, 1, np.pi / 180, 80, minLineLength=0.2 * out_w, maxLineGap=25)
+        if segs is None:
+            return []
+        segs = segs.reshape(-1, 4).astype(float)          # OpenCV 4 and 5 shape these differently
+        return [(y1 + y2) / 2 for x1, y1, x2, y2 in segs if abs(y2 - y1) < 0.1 * abs(x2 - x1)]
+
+    red_ys, blue_ys = stripe_ys(red), stripe_ys(blue)
+    votes = [r < min(blue_ys, key=lambda b: abs(b - r)) for r in red_ys] if blue_ys else []
+    stripes = len(votes) > 0
+    upright = sum(votes) >= len(votes) / 2 if stripes else True
 
     # (camera pixel, grid pixel) pairs for every terminal hole.
     src, dst = [], []
@@ -423,8 +469,8 @@ def run(camera, rows: int) -> None:
     cv2.destroyAllWindows()
 
 
-def calibrate_from_camera(camera, rows: int, timeout: float = 15.0) -> tuple[Board, dict]:
-    """Retry auto_calibrate on fresh frames until it succeeds or times out."""
+def calibrate_from_camera(camera, rows: int, timeout: float = 15.0, prev: "Board | None" = None) -> tuple[Board, dict]:
+    """Retry auto_calibrate on fresh frames until it succeeds or times out. prev: keep its orientation."""
     import time
     last: Exception | str = "no camera frames"
     deadline = time.time() + timeout
@@ -432,7 +478,7 @@ def calibrate_from_camera(camera, rows: int, timeout: float = 15.0) -> tuple[Boa
         frame = camera.latest()
         if frame is not None:
             try:
-                return auto_calibrate(frame, rows)
+                return auto_calibrate(frame, rows, prev=prev)
             except CalibrationError as e:
                 last = e
         time.sleep(0.2)
