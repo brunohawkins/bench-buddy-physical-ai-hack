@@ -292,6 +292,12 @@ if __name__ == "__main__":
             return
         r = vision.check_placement(state["before"], args.row, args.colour)
         print(r)
+        with vision._lock:
+            after = vision._warped.copy()
+        scores = hole_scores(vision.board, state["before"].image, after)
+        top = np.argsort(-scores)[:5]
+        print(f"top hole scores (changed > {CHANGED}):",
+              ", ".join(f"{vision.board.holes[i][1]}{vision.board.holes[i][0]}={scores[i]:.1f}" for i in top))
 
     vision.status = "press b to take 'before'"
     while True:
