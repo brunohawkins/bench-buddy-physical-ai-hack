@@ -55,6 +55,7 @@ END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
+MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
 
 # OpenCV HSV: H 0-180, S and V 0-255.
 HSV_RANGES = {
@@ -270,6 +271,8 @@ class Vision:
         out.mkdir(exist_ok=True)
         cv2.imwrite(str(out / f"{stamp}_before.png"), before)
         cv2.imwrite(str(out / f"{stamp}_after.png"), after)
+        if mask.mean() < 0.005:
+            return                                # nothing worth logging
         ends, _ = plug_ends(self.board, mask, before, after)
         print(f"  debug {stamp}: changed {mask.mean():.1%}; plugs " +
               (", ".join(f"{e['kind']} {e['col']}{e['row']}" for e in ends) or "none"), flush=True)
@@ -280,14 +283,21 @@ class Vision:
             calibrate.save_board(self.board)
 
     def _aligned(self, raw):
-        """Warp a raw frame to the board, re-calibrating from it first (the board shifts when a wire
-        is pushed in). Keeps the current grid if calibration fails (e.g. a hand is in the way)."""
+        """Warp a raw frame to the board. Re-calibrates from the frame, but only switches grid when the
+        board has really moved (each fit wobbles by a pixel or two, more than the change mask forgives).
+        Keeps the current grid if calibration fails (e.g. a hand is in the way)."""
+        import cv2
         import calibrate
         try:
-            board, _ = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
-            self.board = board
+            new, _ = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
         except calibrate.CalibrationError:
-            pass
+            return self.board.warp(raw)
+        moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
+        shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
+        if shift > MOVED:
+            self.board = new
+            self.status = f"board moved {shift:.1f} holes: re-aligned"
+            print(f"  {self.status}", flush=True)
         return self.board.warp(raw)
 
     def _watch_loop(self):
