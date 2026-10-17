@@ -68,6 +68,7 @@ LED_WARMUP = 2.0         # seconds of learning the board with the LED off before
 LED_BODY_MAX = 3 * PITCH  # an LED's coloured body is ~1-2 holes across; a cable is longer
 CONFIRM_AFTER = 0.5      # seconds: a change must read the same twice this far apart to become an event
 RELEARN_AFTER = 3        # still periods in a row with a big change before accepting it as the new board
+REALIGN_HOLES = 0.9      # re-align only from a fit that found this fraction of the holes (board uncovered)
 MOVED = 0.35             # switch to a fresh calibration only when the grid has shifted this many pitches
 
 # OpenCV HSV: H 0-180, S and V 0-255.
@@ -319,6 +320,8 @@ class Vision:
         self._still_since = time.time()
         self._fps = 0.0
         self.baseline = None                      # last accepted still board; events are changes from it
+        self._baseline_raw = None                 # the camera frame behind it (re-flattened if the grid changes)
+        self._realign = None                      # candidate new grid, waiting for a second agreeing fit
         self.events: list[dict] = []              # {"t", "kind": placed|removed, "holes": ["i14"], "before", "after", ...}
         self.wires: dict[str, tuple[float, float]] = {}   # wire ends in the board: label -> warped (x, y)
         self.led = {"on": False, "label": None, "xy": None}  # LED state, updated every frame (see _led_step)
@@ -369,9 +372,28 @@ class Vision:
         import cv2
         import calibrate
         try:
-            new, _ = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
+            new, info = calibrate.auto_calibrate(raw, self.board.rows, prev=self.board)
         except calibrate.CalibrationError:
             return self.board.warp(raw)
+        if info.get("holes", 0) < REALIGN_HOLES * self.board.rows * 10:
+            return self.board.warp(raw)                  # parts or a hand cover holes: the fit can slip a hole
+        moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
+        shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
+        if shift <= MOVED:
+            self._realign = None
+            return self.board.warp(raw)
+        if self._realign is not None:                    # switch only when two fits in a row agree
+            again = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self._realign.H).reshape(-1, 2)
+            if float(np.linalg.norm(again - self._realign.hole_px, axis=1).mean()) / PITCH < 0.15:
+                self.board, self._realign = new, None
+                self._led_ref = None                     # reference was in the old grid
+                if self._baseline_raw is not None:
+                    self.baseline = new.warp(self._baseline_raw)
+                self.status = f"board moved {shift:.1f} holes: re-aligned"
+                print(f"  {self.status}", flush=True)
+                return self.board.warp(raw)
+        self._realign = new
+        return self.board.warp(raw)
         moved = cv2.perspectiveTransform(new.hole_cam.reshape(-1, 1, 2), self.board.H).reshape(-1, 2)
         shift = float(np.linalg.norm(moved - self.board.hole_px, axis=1).mean()) / PITCH
         if shift > MOVED:
@@ -394,7 +416,7 @@ class Vision:
                 continue
             board_img = self._aligned(raw)
             if self.baseline is None:
-                self.baseline, seen = board_img, period
+                self.baseline, self._baseline_raw, seen = board_img, raw, period
                 self._led_rebase(board_img, period, full=True)
                 self._save_board()
                 self.status = "watching the board"
@@ -406,7 +428,7 @@ class Vision:
                 big += 1
                 seen = period                     # wait for the next movement
                 if big >= RELEARN_AFTER:          # it's not going away: accept the board as it is now
-                    self.baseline, big = board_img, 0
+                    self.baseline, self._baseline_raw, big = board_img, raw, 0
                     self.status = "re-learned the board"
                 else:
                     self.status = "something big is over the board"
@@ -425,7 +447,7 @@ class Vision:
                     self.status = f"something changed at rows {rows[0]}-{rows[-1]}"
                     print(f"[{event['t']}] {self.status}", flush=True)
                     self._emit(event)
-                self.baseline, seen = board_img, period    # cable moved / lighting drift: absorb it
+                self.baseline, self._baseline_raw, seen = board_img, raw, period    # cable moved / lighting drift: absorb it
                 self._led_rebase(board_img, period, full=bool(rows))
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
@@ -454,7 +476,7 @@ class Vision:
                     ([f"removed from {', '.join(removed)}"] if removed else [])
             self.status = "wire " + " and ".join(parts)
             print(f"[{event['t']}] {self.status}", flush=True)
-            self.baseline, seen = board2, period
+            self.baseline, self._baseline_raw, seen = board2, raw2, period
             self._led_rebase(board2, period, full=True)
             self._save_board()
             self._emit(event)
