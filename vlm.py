@@ -35,10 +35,12 @@ def available() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY")) and os.environ.get("VISION_VLM", "1") != "0"
 
 
-JUDGE_PROMPT = """Two top-down photos of the same breadboard, flattened: BEFORE, then AFTER. Row numbers are \
+JUDGE_PROMPT = """Photos of one breadboard: {images}. In the flattened images row numbers are \
 printed above and below the holes; column letters a-e are the top half (a at the top) and f-j the bottom half. The \
 power rails run along the long edges: "top" rails above column a, "bottom" rails below column j; the red stripe \
-marks + and the blue stripe marks -. The yellow outline marks where the pixels changed.
+marks + and the blue stripe marks -. The yellow outline marks where the pixels changed. The flattening uses a computed grid that can be off (the \
+board gets pushed): if its numbers don't line up with the board's own printed row numbers and letters in the camera \
+photos, trust the board's printing, and say "grid misaligned" in "problem".
 
 Parts in this project: jumper wires (coloured cable, black plug at each end), an LD2402 radar module (small PCB, \
 pins V G IO TX RX), a resistor, an LED.
@@ -91,18 +93,39 @@ def _ask(text: str, images: list, timeout: float) -> dict:
     return json.loads(out)
 
 
+def camera_view(frame, board=None, max_w: int = 1280):
+    """The raw camera frame, cropped to the board (generously) and shrunk, for the model to cross-check the grid."""
+    import cv2
+    import numpy as np
+    img = frame
+    if board is not None:
+        pts = board.hole_cam
+        x0, y0 = pts.min(axis=0)
+        x1, y1 = pts.max(axis=0)
+        pad = 0.25 * max(x1 - x0, y1 - y0)
+        h, w = frame.shape[:2]
+        img = frame[int(max(0, y0 - pad)):int(min(h, y1 + pad)), int(max(0, x0 - pad)):int(min(w, x1 + pad))]
+    if img.shape[1] > max_w:
+        img = cv2.resize(img, None, fx=max_w / img.shape[1], fy=max_w / img.shape[1], interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(img)
+
+
 def judge(before_crop, after_crop, board: list | None = None, context: str | None = None,
-          timeout: float = 25) -> dict:
+          timeout: float = 45, cam_before=None, cam_after=None) -> dict:
     """What was plugged in / pulled out between two labelled crops of the same area, the updated part list
     and a plain-English narration. board: the part list from the last judge() call. Raises on API errors."""
     known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing yet)"
-    out = _ask(JUDGE_PROMPT.format(board=known, context=context or "(nothing)"), [before_crop, after_crop], timeout)
+    images, names = [before_crop, after_crop], ["flattened BEFORE", "flattened AFTER"]
+    if cam_before is not None and cam_after is not None:
+        images, names = [cam_before, cam_after] + images, ["camera BEFORE", "camera AFTER"] + names
+    out = _ask(JUDGE_PROMPT.format(board=known, context=context or "(nothing)", images=", ".join(names)), images, timeout)
     out.setdefault("changes", [])
     out.setdefault("board", board or [])
     return out
 
 
-VERIFY_PROMPT = """Top-down photo of a breadboard, flattened. Row numbers are printed above and below the holes; \
+VERIFY_PROMPT = """Photos of one breadboard: the camera view, then the same board flattened. The flattening uses a \
+computed grid that can be off: trust the board's own printed numbers if they disagree. In the flattened image row numbers are printed above and below the holes; \
 column letters a-e are the top half (a at the top) and f-j the bottom half. Power rails: "top" above column a, \
 "bottom" below column j; red stripe +, blue stripe -.
 
@@ -120,10 +143,12 @@ Reply JSON only: {{"status": "pass"|"fail"|"unsure", "detail": "<one or two shor
 you see and, if wrong, exactly what to move where>"}}"""
 
 
-def verify(image_bgr, step: str, board: list | None = None, context: str | None = None, timeout: float = 25) -> dict:
+def verify(image_bgr, step: str, board: list | None = None, context: str | None = None, timeout: float = 45,
+           camera=None) -> dict:
     """Does the board show this step done? -> {"status": pass|fail|unsure, "detail"}. Raises on API errors."""
     known = json.dumps(board or [], separators=(",", ":")) if board else "(nothing recorded yet)"
-    return _ask(VERIFY_PROMPT.format(board=known, context=context or "(nothing)", step=step), [image_bgr], timeout)
+    images = [image_bgr] if camera is None else [camera, image_bgr]
+    return _ask(VERIFY_PROMPT.format(board=known, context=context or "(nothing)", step=step), images, timeout)
 
 
 def describe(image_bgr, question: str | None = None, timeout: float = 20, hint: str | None = None) -> dict:

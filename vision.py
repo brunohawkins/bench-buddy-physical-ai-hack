@@ -575,11 +575,12 @@ class Vision:
         import vlm
         with self._lock:
             warped = None if self._warped is None else self._warped.copy()
+            raw = None if self._raw is None else self._raw.copy()
         if warped is None or not vlm.available():
             return CheckResult("unsure", "I can't see the board right now.")
         try:
             r = vlm.verify(vlm.labelled_crop(self.board, warped, None, self.expect_rows, pad_rows=0), step,
-                           self.parts, "\n".join(self.context))
+                           self.parts, "\n".join(self.context), camera=vlm.camera_view(raw, self.board))
         except Exception as e:
             print(f"  [vlm] verify failed: {e!r}", flush=True)
             return CheckResult("unsure", "I couldn't check that just now. Say done to try again.")
@@ -609,7 +610,9 @@ class Vision:
         try:
             v = vlm.judge(vlm.labelled_crop(self.board, before, overlay, self.expect_rows),
                           vlm.labelled_crop(self.board, board_img, overlay, self.expect_rows), self.parts,
-                          context="\n".join(self.context))
+                          context="\n".join(self.context),
+                          cam_before=None if self._baseline_raw is None else vlm.camera_view(self._baseline_raw, self.board),
+                          cam_after=vlm.camera_view(raw, self.board))
         except Exception as e:                              # never let the model break the loop
             print(f"  [vlm] failed ({e!r}); using pixel rules", flush=True)
             return False
