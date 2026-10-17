@@ -27,3 +27,8 @@ build/
 wandb/
 logs/
 outputs/
+
+# Bench Buddy runtime output
+frames/
+log.jsonl
+phrase_cache/

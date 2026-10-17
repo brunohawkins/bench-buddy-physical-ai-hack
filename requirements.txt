@@ -1,0 +1,8 @@
+opencv-contrib-python
+numpy
+pyserial
+openai
+elevenlabs
+sounddevice
+soundfile
+python-dotenv

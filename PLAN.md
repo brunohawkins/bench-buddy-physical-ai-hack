@@ -30,44 +30,28 @@ Inconsistencies fixed from v1: "Won't have: the Jetson Nano" contradicted using 
 
 ## Interfaces (agree at 0:00, don't change without telling the others)
 
+Shared types are in `contracts.py` (`Snapshot`, `CheckResult`, `Intent`, `ProbeResult`). Each module has a real class and a `Fake…` class with the same methods:
+
 ```python
-# --- V: vision ---------------------------------------------------------
-class Camera:
-    def latest(self) -> np.ndarray: ...            # newest BGR frame
+# --- V: vision.py, camera.py, calibrate.py --------------------------------
+Camera(source).latest() -> np.ndarray | None             # newest BGR frame
+Vision(camera).snapshot() -> Snapshot                    # stable warped board image
+Vision.check_placement(before, expect_rows, wire_colour) -> CheckResult   # pass | fail | unsure
 
-def snapshot() -> Snapshot: ...                    # stable, warped board image; saved to frames/
-def check_placement(before: Snapshot, expect_rows: list[int],
-                    wire_colour: str | None) -> CheckResult: ...
+# --- L: voice.py, brain.py, fsm.py ----------------------------------------
+Voice().listen() -> str                                  # push-to-talk transcript
+Voice.say(text) -> None                                  # cached phrase, else TTS, else mac_say
+Brain().parse_parts(transcript) -> dict                  # parts JSON below
+Brain.classify(transcript, state) -> Intent              # PARTS DONE NOT_WORKING QUESTION REPEAT OTHER
+Brain.explain(result: dict) -> str                       # one spoken sentence; brain.template() is the fallback
 
-@dataclass
-class CheckResult:
-    status: Literal["pass", "fail", "unsure"]
-    detail: str            # "inserted in row 15, expected 14"
-    rows_found: list[int]
-    frame: str             # path to the annotated jpg
-
-# --- L: voice + LLM ----------------------------------------------------
-def listen() -> str: ...                           # push-to-talk, returns transcript
-def say(text: str) -> None: ...                    # cached phrase = instant, else TTS
-def parse_parts(transcript: str) -> dict: ...      # parts JSON below
-def classify(transcript: str, state: str) -> Intent: ...
-    # Intent.kind in {PARTS, DONE, NOT_WORKING, QUESTION, REPEAT, OTHER}
-def explain(result: dict) -> str: ...              # structured result -> one spoken sentence
-
-# --- H: hardware -------------------------------------------------------
-class Bench:
-    def ping(self) -> bool: ...
-    def read(self, pin: str) -> int: ...           # mV
-    def sample(self, pin: str, ms: int) -> tuple[int, int, int]: ...  # min, max, mean mV
-    def freq(self, ms: int) -> float: ...          # Hz
-
-def predict(r1: float, r2: float, c: float) -> tuple[float, float]: ...  # Hz, duty
-def within(measured: float, predicted: float, tol: float = 0.25) -> bool: ...
-def probe(bench: Bench) -> ProbeResult: ...
-    # ProbeResult: ok, failed_node, reading ("A2 = 0.02 V"), hint
+# --- H: bench_serial.py, physics.py, debug.py, firmware/bench/bench.ino ---
+Bench(port).ping() / .read(pin) -> mV / .sample(pin, ms) -> (min, max, mean) / .freq(ms) -> Hz
+predict(r1, r2, c) -> (hz, duty);  within(measured, predicted, tol=0.25) -> bool
+probe(bench) -> ProbeResult
 ```
 
-Each owner commits a fake of their module first (canned return values), so `python main.py --fake` runs the whole flow from the start.
+`python main.py --fake` runs the whole flow with every module faked; `--fake vision bench` fakes only those. Swap real modules in one at a time.
 
 ### Serial protocol (115200 baud, one line each way)
 
@@ -81,12 +65,13 @@ Each owner commits a fake of their module first (canned return values), so `pyth
 
 ### Parts JSON, project step and log line
 
-Unchanged from v1:
+As in v1, except a measure step names a `pin` rather than a `cmd`:
 
 ```
 {"parts": [{"type": "resistor", "value": 68000, "qty": 2}, ...], "unclear": [...]}
 {"id": "reset", "say": "Connect pin 4 to the 5 volt rail with a red wire.",
  "check": {"kind": "vision", "expect_rows": [13], "wire_colour": "red"}}
+{"id": "power-on", "say": "Plug in the Arduino.",
 {"t": "14:02:11", "state": "STEP", "step": "reset", "check": "vision",
  "result": "fail", "detail": "inserted in row 15, expected 13", "frame": "frames/0031.jpg"}
 ```
