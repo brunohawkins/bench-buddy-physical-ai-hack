@@ -60,7 +60,8 @@ class BenchBuddy:
         while True:
             text = self.voice.listen()
             intent = self.brain.classify(text, self.state)
-            self.log(heard=text, intent=intent.kind, stt_ms=getattr(self.voice, "last_stt_ms", None))
+            self.log(heard=text, intent=intent.kind, stt_ms=getattr(self.voice, "last_stt_ms", None),
+                     llm_ms=getattr(self.brain, "last_ms", None))
             if intent.kind in accept or intent.kind == "NOT_WORKING":
                 return text, intent
             if intent.kind == "REPEAT":

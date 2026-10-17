@@ -1,0 +1,84 @@
+"""Hand-checked projects the tutor can run instead of an LLM-written plan. Owner: L.
+
+radar_led is the demo (from radar-led-demo.md). 555 wraps project.py, which fsm.py (--script) still uses.
+A step's check is "confirm" (the user says it's done), "vision" (expect_rows) or "measure" (needs the Arduino).
+"""
+import project
+
+RADAR_LED = {
+    "id": "radar_led",
+    "name": "radar presence LED",
+    "match": "a light that turns on when someone walks up: radar, presence, motion or people sensor with an LED",
+    "required": [
+        {"desc": "an LD2402 radar module", "type": ("other", "ic"), "keywords": ("radar", "ld2402", "hlk")},
+        {"desc": "an LED", "type": ("led",)},
+        {"desc": "a 1 kilohm resistor", "type": ("resistor",), "range": (220, 1000)},
+        {"desc": "a breadboard", "type": ("other",), "keywords": ("breadboard",)},
+    ],
+    "steps": [
+        {"id": "radar", "say": "Push the radar module into the breadboard so each of its five pins, V, G, IO, TX and RX, "
+                               "sits in its own row.",
+         "why": "Pins in the same row are connected, so each pin needs its own row. TX and RX stay unconnected.",
+         "check": {"kind": "confirm"}},
+        {"id": "power", "say": "Connect the radar's V pin to the 5 volt rail, and its G pin to the ground rail.",
+         "why": "V and G power the module. If the silkscreen says 3.3 volts, use the 3.3 volt supply instead.",
+         "check": {"kind": "confirm"}},
+        {"id": "io", "say": "Connect the IO pin to one end of the 1 kilohm resistor.",
+         "why": "IO goes high, about 3.3 volts, when it detects someone. The resistor limits the LED's current so "
+                "it doesn't overload the radar's IO pin.",
+         "check": {"kind": "confirm"}},
+        {"id": "led-anode", "say": "Connect the other end of the resistor to the LED's long leg.",
+         "why": "The long leg is the positive side, the anode. Current only flows from long leg to short leg.",
+         "check": {"kind": "confirm"}},
+        {"id": "led-cathode", "say": "Connect the LED's short leg to the ground rail.",
+         "why": "That closes the loop back to ground, so current can flow when IO goes high.",
+         "check": {"kind": "confirm"}},
+        {"id": "usb", "say": "Plug in the USB power.",
+         "why": "The laptop's USB port supplies the 5 volts and ground for the rails.",
+         "check": {"kind": "confirm"}},
+        {"id": "finish", "say": "Now walk in front of the radar. Did the LED light up?",
+         "why": "The radar sees you, IO goes high, and current flows through the resistor and LED.",
+         "check": {"kind": "confirm"}},
+    ],
+    "done": "It works! The radar sees you, drives IO high, and lights the LED. Say it's not working if it stops.",
+    "troubleshooting": [
+        "Power: is V on the 5 volt rail and G on ground? If the silkscreen says 3.3 V, power it from 3.3 V.",
+        "LED direction: the long leg must face the resistor, the short leg ground. Backwards, it never lights.",
+        "Rows: the resistor end and the LED long leg must share a row; a leg one row off breaks the circuit.",
+        "Dim LED: at about 1 mA through 1 kilohm it is dim but visible; shade it with a hand or use 220 ohms.",
+        "Warm-up: the radar can take a few seconds after power-up before it detects anything.",
+        "If it still never lights, IO may be outputting serial data instead of on/off; that needs a script.",
+    ],
+}
+
+P555 = {
+    "id": "555",
+    "name": "555 LED blinker",
+    "match": "an LED that blinks or flashes using a 555 timer chip",
+    "required": None,                    # uses project.missing()
+    "steps": project.STEPS + [{"id": "finish", "say": "Measuring the blink rate.", "why": "",
+                               "check": {"kind": "freq"}}],
+    "done": "Your blinker is working. Tell me if anything stops working.",
+    "troubleshooting": [],               # debug.probe() reads the test points instead
+}
+
+PROJECTS = {p["id"]: p for p in (RADAR_LED, P555)}
+
+
+def missing(proj: dict, parts: list[dict]) -> list[str]:
+    """Spoken descriptions of the project's required parts that aren't in `parts`."""
+    if proj["required"] is None:
+        return project.missing(parts)
+    return [need["desc"] for need in proj["required"] if not any(_has(need, p) for p in parts)]
+
+
+def _has(need: dict, part: dict) -> bool:
+    if part.get("type") not in need["type"]:
+        return False
+    if "keywords" in need:
+        name = str(part.get("part", "")).lower()
+        return any(k in name for k in need["keywords"])
+    if "range" in need:
+        lo, hi = need["range"]
+        return part.get("value") is not None and lo * 0.99 <= part["value"] <= hi * 1.01
+    return True
