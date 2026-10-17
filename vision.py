@@ -138,7 +138,7 @@ class Vision:
                 board = calibrate.load()
             except FileNotFoundError:
                 board, info = calibrate.calibrate_from_camera(camera, rows)
-                calibrate.save(board.corners.tolist(), board.rows)
+                calibrate.save_board(board)
                 print(f"auto-calibrated: {info['holes']}/{info['expected']} holes")
         self.board = board
         self._busy = False                        # true during a check: don't re-snap mid-comparison
@@ -175,7 +175,7 @@ class Vision:
             shift = float(np.linalg.norm(moved - old.hole_px, axis=1).mean()) / PITCH
             if shift > RECAL_SHIFT:
                 self.board = new
-                calibrate.save(new.corners.tolist(), new.rows)
+                calibrate.save_board(new)
                 self.status = f"board moved {shift:.1f} holes: recalibrated"
 
     def _loop(self):

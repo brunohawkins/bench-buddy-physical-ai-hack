@@ -30,7 +30,7 @@ class Board:
     """Breadboard geometry for one calibration. In the warped image x runs along the rows (row 1 on the
     left) and y across the columns (j at the top, a at the bottom), as you'd read the board."""
 
-    def __init__(self, corners, rows: int):
+    def __init__(self, corners, rows: int, offsets=None):
         import cv2
         self.rows = rows
         self.corners = np.float32(corners)
@@ -39,7 +39,9 @@ class Board:
         self.H = cv2.getPerspectiveTransform(self.corners, dst)
         self.H_inv = np.linalg.inv(self.H)
         self.holes = [(r, c) for r in range(1, rows + 1) for c in COLS]
-        self.hole_px = np.float32([self.hole_xy(r, c) for r, c in self.holes])
+        # offsets: per-row (dx, dy) correction in warped pixels for bowing, lifting or lens distortion
+        self.offsets = np.zeros((rows + 1, 2), np.float32) if offsets is None else np.float32(offsets)
+        self.hole_px = np.float32([self.hole_xy(r, c) for r, c in self.holes]) + self.offsets[[r for r, _ in self.holes]]
         self.hole_cam = self.to_camera(self.hole_px)
 
     @staticmethod
@@ -81,13 +83,20 @@ class Board:
         return frame
 
 
-def save(corners, rows: int) -> None:
-    CALIB_PATH.write_text(json.dumps({"corners": [list(map(float, c)) for c in corners], "rows": rows}))
+def save(corners, rows: int, offsets=None) -> None:
+    data = {"corners": [list(map(float, c)) for c in corners], "rows": rows}
+    if offsets is not None:
+        data["offsets"] = np.round(np.asarray(offsets, float), 2).tolist()
+    CALIB_PATH.write_text(json.dumps(data))
+
+
+def save_board(board: "Board") -> None:
+    save(board.corners.tolist(), board.rows, board.offsets)
 
 
 def load() -> Board:
     data = json.loads(CALIB_PATH.read_text())
-    return Board(data["corners"], data["rows"])
+    return Board(data["corners"], data["rows"], data.get("offsets"))
 
 
 # --- automatic calibration -------------------------------------------------------------
@@ -132,6 +141,9 @@ def _board_candidates(frame):
     grey = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (7, 7), 0)
     _, mask = cv2.threshold(grey, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    # Opening erases anything thinner than ~25 px: wires lying across the edge or looping off the
+    # board are bright on a dark desk and would otherwise stretch the outline.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         raise CalibrationError("no bright board found")
@@ -184,7 +196,38 @@ def auto_calibrate(frame, rows: int = 63) -> tuple["Board", dict]:
             best = board, info
     if best is None:
         raise CalibrationError("; ".join(errors))
-    return _refine(frame, *best)
+    return _row_offsets(frame, *_refine(frame, *best))
+
+
+def _row_offsets(frame, board: "Board", info: dict) -> tuple["Board", dict]:
+    """Per-row correction on top of the homography. A flat-plane model can't follow a board that bows
+    or has one end lifted (a wire's weight does this), so measure where each row's holes really are."""
+    import cv2
+    flat = cv2.cvtColor(board.warp(frame), cv2.COLOR_BGR2GRAY)
+    k = int(PITCH * 0.8) | 1
+    blackhat = cv2.morphologyEx(flat, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    _, bw = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, _, stats, cents = cv2.connectedComponentsWithStats(bw)
+    area = stats[1:, cv2.CC_STAT_AREA]
+    cents = cents[1:][(area > 0.02 * PITCH ** 2) & (area < 0.5 * PITCH ** 2)]
+    if len(cents) == 0:
+        return board, info
+    d = np.linalg.norm(cents[:, None, :] - board.hole_px[None, :, :], axis=2)
+    nearest = d.argmin(axis=1)
+    ok = d[np.arange(len(cents)), nearest] < 0.45 * PITCH
+    rows_of = np.array([board.holes[i][0] for i in nearest[ok]])
+    off = cents[ok] - board.hole_px[nearest[ok]]
+    measured = {r: np.median(off[rows_of == r], axis=0) for r in range(1, board.rows + 1) if (rows_of == r).sum() >= 3}
+    if len(measured) < board.rows // 2:
+        return board, info
+    known = np.array(sorted(measured))
+    table = np.zeros((board.rows + 1, 2), np.float32)
+    for axis in (0, 1):
+        vals = np.array([measured[r][axis] for r in known])
+        smooth = np.array([np.median(vals[max(0, i - 1):i + 2]) for i in range(len(vals))])   # 3-row median
+        table[1:, axis] = np.interp(np.arange(1, board.rows + 1), known, smooth)
+    corrected = Board(board.corners.tolist(), board.rows, board.offsets + table)
+    return corrected, {**info, "max_row_offset_pitch": float(np.abs(table).max() / PITCH)}
 
 
 def _refine(frame, board: "Board", info: dict) -> tuple["Board", dict]:
@@ -264,7 +307,8 @@ def _fit(frame, box, length, width, rows: int) -> tuple["Board", dict]:
     for j, ly in enumerate(terminal):
         line_of[np.abs(pts[:, 1] - ly) < 0.3 * pitch_y] = j
     term = pts[line_of >= 0]
-    cols_x = np.array([g.mean() for g in _clusters(term[:, 0], 0.4 * pitch_y) if len(g) >= 3])
+    # a real row has a hole on each of the 10 lines; wires can hide a few, stray marks give only a couple
+    cols_x = np.array([g.mean() for g in _clusters(term[:, 0], 0.4 * pitch_y) if len(g) >= 5])
     if len(cols_x) < rows // 2:
         raise CalibrationError(f"only {len(cols_x)} rows of holes found")
     pitch_x = float(np.median(np.diff(cols_x)))
@@ -398,7 +442,7 @@ def calibrate_from_camera(camera, rows: int, timeout: float = 15.0) -> tuple[Boa
 def run_auto(camera, rows: int, show: bool = True) -> None:
     import cv2
     board, info = calibrate_from_camera(camera, rows)
-    save(board.corners.tolist(), rows)
+    save_board(board)
     print(f"saved {CALIB_PATH}: {info['holes']}/{info['expected']} holes, "
           f"fit error {info['rms_pitch']:.2f} pitch, {info['camera_pitch_px']:.1f} camera px per hole, "
           f"{'upright' if info['upright'] else 'rotated 180'}{'' if info['stripes'] else ' (no rail stripes seen)'}")
