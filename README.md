@@ -5,8 +5,8 @@ Our project for the **Physical AI Hack**.
 ## Team
 
 - Bruno Hawkins ([@brunohawkins](https://github.com/brunohawkins))
-- _Teammate 2_
-- _Teammate 3_
+- [@SummerRainZozo](https://github.com/SummerRainZozo)
+- [@parthiv-n](https://github.com/parthiv-n)
 
 ## Getting started
 
