@@ -17,6 +17,7 @@ git clone https://github.com/brunohawkins/bench-buddy-physical-ai-hack.git
 cd bench-buddy-physical-ai-hack
 
 python main.py --fake            # whole flow, typed input, no hardware/keys/packages needed
+python main.py --fake --ui       # same flow in the browser UI at http://localhost:8000
 
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -37,6 +38,8 @@ python main.py --fake vision bench   # e.g. real voice + LLM, fake camera + Ardu
 | `camera.py` | V | Threaded frame grabber; `python camera.py 1` to preview a camera index |
 | `calibrate.py` | V | `python calibrate.py --rows 63`: click 4 holes → warped board → (row, col) ↔ pixel |
 | `vision.py` | V | Real-time view + placement check; `python vision.py --row 13 --colour red` to test live |
+| `ui_server.py` | UI | `--ui`: serves `ui/`, streams fsm log lines to the page, takes typed/spoken input |
+| `ui/` | UI | Browser front end (landing page, chat card, board view); see `ui/README.md` |
 | `tests/` | all | `.venv/bin/python tests/test_vision.py` |
 | `firmware/bench/bench.ino` | H | Arduino serial firmware (PING, READ, SAMPLE, FREQ) |
 | `bench_serial.py` | H | Python side of the serial protocol |

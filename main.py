@@ -3,6 +3,7 @@
     python main.py --fake                 # everything fake: no hardware, no API keys, no packages
     python main.py --fake vision bench    # real voice + brain, fake vision + bench
     python main.py                        # everything real
+    python main.py --fake --ui            # browser UI on http://localhost:8000 instead of the terminal
 """
 import argparse
 import os
@@ -59,11 +60,21 @@ def main():
     p.add_argument("--fault", choices=("reset", "none"), default="reset",
                    help="fault the fake bench develops after the first measurement")
     p.add_argument("--speak", action="store_true", help="fake voice reads replies aloud with macOS say")
+    p.add_argument("--ui", action="store_true", help="talk to it in the browser (ui_server.py) instead of the terminal")
+    p.add_argument("--port", type=int, default=8000, help="port for --ui")
+    p.add_argument("--no-browser", action="store_true", help="with --ui, don't open a browser tab")
     args = p.parse_args()
     fake = set(MODULES) if args.fake == [] else set(args.fake or ())
 
     vision, voice, brain, bench = build(fake, args)
+    if args.ui:
+        from ui_server import UI, UIVoice
+        ui = UI(port=args.port, vision=vision, voice=voice)
+        voice = UIVoice(voice, ui)
     buddy = BenchBuddy(vision, voice, brain, bench)
+    if args.ui:
+        ui.attach(buddy)
+        ui.start(open_browser=not args.no_browser)
 
     def run_quietly():
         try:
@@ -77,6 +88,12 @@ def main():
             fsm = threading.Thread(target=run_quietly, daemon=True)
             fsm.start()
             vision.show_forever(stop=lambda: not fsm.is_alive())
+        elif args.ui:
+            # Keep the main thread free for Ctrl-C while the page drives the state machine.
+            fsm = threading.Thread(target=run_quietly, daemon=True)
+            fsm.start()
+            while fsm.is_alive():
+                fsm.join(0.5)
         else:
             run_quietly()
     except KeyboardInterrupt:

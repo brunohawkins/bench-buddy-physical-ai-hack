@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench Buddy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="vendor/iso.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="iso" data-theme="light">
+<div class="mat" aria-hidden="true"><svg class="mat-marks" id="matMarks"></svg></div>
+
+<!-- ============ Landing ============ -->
+<section class="view landing" id="landing">
+  <header class="nav">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Bench Buddy</div>
+    <span class="nav-meta">Physical AI Hack · 2026</span>
+  </header>
+  <div class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow"><span class="dot"></span>A second pair of eyes at your bench</p>
+      <h1>It watches your board.<br>It talks you through it.</h1>
+      <p class="lede">Tell Bench Buddy what parts you've got. It picks a circuit, shows you where every wire goes, checks each one through your phone camera, and tells you why it isn't working.</p>
+      <div class="cta-row">
+        <button class="btn-primary" id="start">Start building <span aria-hidden="true">→</span></button>
+        <span class="cta-note">Voice first · typing works too</span>
+      </div>
+      <ol class="features">
+        <li><b>01</b><span>Knows your parts</span></li>
+        <li><b>02</b><span>Sees every placement</span></li>
+        <li><b>03</b><span>Explains the fault</span></li>
+      </ol>
+    </div>
+    <figure class="hero-board">
+      <div id="heroBoard"></div>
+      <figcaption><span>Fig. 1</span><span>555 astable · 0.99 Hz</span></figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ Bench ============ -->
+<section class="view bench" id="bench" hidden>
+  <aside class="panel" aria-label="Conversation with Bench Buddy">
+    <header class="panel-head">
+      <button class="back" id="back" title="Back to start" aria-label="Back to start">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 6 10l6 6"/></svg>
+      </button>
+      <div class="avatar" id="avatar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="who">
+        <div class="who-name">Bench Buddy</div>
+        <div class="who-status" id="statusText">Starting…</div>
+      </div>
+      <button class="icon-btn" id="mute" aria-pressed="false" title="Mute voice" aria-label="Mute voice">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path class="spk" d="M3 8h3l4-3v10l-4-3H3z"/><path class="on" d="M13 7.5a3.5 3.5 0 0 1 0 5M15 5.5a6.5 6.5 0 0 1 0 9"/><path class="off" d="m13 8 4 4m0-4-4 4"/></svg>
+      </button>
+    </header>
+
+    <ol class="fsm" id="fsm">
+      <li data-s="INVENTORY">Parts</li>
+      <li data-s="PROPOSE">Plan</li>
+      <li data-s="STEP">Build</li>
+      <li data-s="CHECK">Check</li>
+      <li data-s="MEASURE">Measure</li>
+      <li data-s="DONE">Done</li>
+      <li data-s="DEBUG" class="debug">Debug</li>
+    </ol>
+
+    <details class="parts-list" id="partsList" open>
+      <summary><span>On the board</span><b id="partsCount">0 / 0</b></summary>
+      <ul id="partsItems"></ul>
+    </details>
+
+    <div class="log" id="log" aria-live="polite"></div>
+
+    <div class="suggest" id="suggest"></div>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <button type="button" class="mic" id="mic" aria-label="Hold to talk">
+        <span class="mic-ring"></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6"/></svg>
+      </button>
+      <div class="field">
+        <textarea id="input" rows="1" placeholder="Type to Bench Buddy…" aria-label="Message"></textarea>
+        <button type="submit" class="send" aria-label="Send">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5M5 10l5-5 5 5"/></svg>
+        </button>
+      </div>
+    </form>
+    <p class="hint" id="hint">Hold <kbd>Space</kbd> or the mic to talk · <kbd>Enter</kbd> sends</p>
+  </aside>
+
+  <main class="stage">
+    <div class="instruction" id="instruction">
+      <span class="ins-label" id="insLabel">Waiting</span>
+      <p class="ins-text" id="insText">Say hi to get started.</p>
+    </div>
+
+    <div class="toolbar">
+      <span class="conn" id="conn" title=""><i></i><span>Demo</span></span>
+      <button class="tool" id="camBtn" aria-pressed="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="9" rx="2"/><path d="m13.5 9 4-2.5v7l-4-2.5"/></svg>
+        Camera
+      </button>
+    </div>
+
+    <div class="board-wrap" id="board"></div>
+
+    <div class="cam" id="cam" hidden>
+      <div class="cam-head"><span>Phone camera</span><select id="camSelect" aria-label="Camera source"></select></div>
+      <img id="camImg" alt="Live camera feed of the breadboard" hidden>
+      <video id="camVideo" autoplay muted playsinline hidden></video>
+    </div>
+
+    <footer class="corners">
+      <span>Fig. 2 · 555 astable · R1 10 kΩ · R2 68 kΩ · C 10 µF</span>
+      <span class="readout" id="readout">predicted 0.99 Hz · measured —</span>
+    </footer>
+  </main>
+</section>
+
+<div class="toast" id="toast" role="status" hidden></div>
+<script type="module" src="js/app.mjs"></script>
+</body>
+</html>
