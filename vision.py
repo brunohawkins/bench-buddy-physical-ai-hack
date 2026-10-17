@@ -53,6 +53,7 @@ PLUG_DARK_MIN = 0.2                  # a candidate must be at least this dark (f
 TOO_MUCH = 0.12          # more than this fraction of the board changed: a hand or the board moved
 END_SNAP = 0.75 * PITCH  # max distance from a plug centre to a terminal hole
 COLOUR_MIN = 0.15        # fraction of wire pixels that must match the wire colour
+COMPONENT_MIN_AREA = 2 * PITCH ** 2  # a non-plug change this big (after erasing thin cable) is a component
 LED_V = 235              # a lit LED: brightness (HSV V) at least this...
 LED_S = 60               # ...with colour (saturation) at least this...
 LED_RISE = 40            # ...and at least this much brighter than the same spot with the LED off
@@ -384,6 +385,15 @@ class Vision:
             ends, _ = plug_ends(self.board, mask, self.baseline, board_img)
             ends = [e for e in ends if e["label"] is not None and not self._near_known_wire(e)]
             if not ends:
+                rows = self._component_rows(mask)
+                if rows:                                    # not a wire plug: a resistor, LED, the radar...
+                    event = {"t": time.strftime("%H:%M:%S"), "kind": "changed", "placed": [], "removed": [],
+                             "holes": [], "rows": rows, "before": self.baseline, "after": board_img,
+                             "overlay": {"mask": mask, "ends": []}}
+                    self.overlay = event["overlay"]
+                    self.status = f"something changed at rows {rows[0]}-{rows[-1]}"
+                    print(f"[{event['t']}] {self.status}", flush=True)
+                    self._emit(event)
                 self.baseline, seen = board_img, period    # cable moved / lighting drift: absorb it
                 continue
             time.sleep(CONFIRM_AFTER)                       # must read the same a moment later
@@ -414,9 +424,60 @@ class Vision:
             print(f"[{event['t']}] {self.status}", flush=True)
             self.baseline, seen = board2, period
             self._save_board()
+            self._emit(event)
+
+    def _emit(self, event: dict) -> None:
+        """Publish an event, then ask the vision model about it in the background (if a key is set)."""
+        with self._event_cv:
+            self.events.append(event)
+            self._event_cv.notify_all()
+        self._describe_async(event)
+
+    def _describe_async(self, event: dict) -> None:
+        import vlm
+        if not vlm.available():
+            return
+
+        def run():
+            try:
+                img = vlm.labelled_crop(self.board, event["after"], event.get("overlay"), self.expect_rows)
+                res = vlm.describe(img)
+            except Exception as e:                          # never let the model break the loop
+                print(f"  [vlm] failed: {e!r}", flush=True)
+                return
+            event["vlm"] = res
+            self.status = "AI: " + str(res.get("summary", ""))
+            print(f"  [vlm] {res}", flush=True)
             with self._event_cv:
-                self.events.append(event)
+                self.events.append({"t": time.strftime("%H:%M:%S"), "kind": "described", "of": event["kind"],
+                                    "vlm": res, "placed": [], "removed": [], "holes": [], "rows": res.get("rows", [])})
                 self._event_cv.notify_all()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def ask(self, question: str) -> dict:
+        """Ask the vision model about the board as it is now, e.g. "is the LED the right way round?"."""
+        import vlm
+        with self._lock:
+            warped = self._warped.copy()
+        return vlm.describe(vlm.labelled_crop(self.board, warped, self.overlay, self.expect_rows), question)
+
+    def _component_rows(self, mask) -> list[int]:
+        """Rows covered by changed blobs that survive erasing thin cable, i.e. a component, not a wire."""
+        import cv2
+        from calibrate import MARGIN_ROW
+        opened = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (PLUG_OPEN, PLUG_OPEN)))
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(opened)
+        rows = set()
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_AREA] < COMPONENT_MIN_AREA:
+                continue
+            x0, w = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_WIDTH]
+            for r in range(int(round((x0 - MARGIN_ROW) / PITCH)) + 1, int(round((x0 + w - MARGIN_ROW) / PITCH)) + 2):
+                if 1 <= r <= self.board.rows:
+                    rows.add(r)
+        return sorted(rows)
 
     def _near_known_wire(self, end: dict) -> bool:
         """A 'placement' within a hole of a wire already in the board is that wire's cable swinging."""
