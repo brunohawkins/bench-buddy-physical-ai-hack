@@ -1,5 +1,7 @@
 # Bench Buddy
 
+**Won 3rd place 🥉 at Physical AI Hack - Reasoning Project (17/10/2026)**
+
 Our project for the **Physical AI Hack**: a second pair of eyes and hands at your bench. It knows your parts, watches your board, probes your circuit and tells you why it isn't working.
 
 The plan, roles, interfaces and timeline are in [PLAN.md](PLAN.md).
